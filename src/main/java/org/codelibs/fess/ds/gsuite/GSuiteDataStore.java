@@ -138,7 +138,7 @@ public class GSuiteDataStore extends AbstractDataStore {
 
         try {
             fileMap.put(FILES_NAME, file.getName());
-            fileMap.put(FILES_DESCRIPTION, file.getDescription());
+            fileMap.put(FILES_DESCRIPTION, file.getDescription() != null ? file.getDescription() : "");
             fileMap.put(FILES_CONTENTS, getFileContents(drive, file));
             fileMap.put(FILES_MIMETYPE, file.getMimeType());
             fileMap.put(FILES_THUMBNAIL_LINK, file.getThumbnailLink());
