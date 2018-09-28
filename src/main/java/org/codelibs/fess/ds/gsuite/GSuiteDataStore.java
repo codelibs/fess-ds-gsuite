@@ -78,7 +78,7 @@ public class GSuiteDataStore extends AbstractDataStore {
                     "files/createdTime", "files/modifiedTime" };
 
     protected String getName() {
-        return "G Suite";
+        return "GSuite";
     }
 
     @Override
