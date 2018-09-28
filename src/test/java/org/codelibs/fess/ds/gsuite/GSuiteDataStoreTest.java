@@ -16,15 +16,16 @@
 package org.codelibs.fess.ds.gsuite;
 
 import com.google.api.services.drive.Drive;
-import com.google.api.services.drive.model.FileList;
-import org.codelibs.fess.ds.gsuite.GSuiteDataStore;
+import org.codelibs.fess.ds.callback.IndexUpdateCallback;
+import org.codelibs.fess.es.config.exentity.DataConfig;
+import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.dbflute.utflute.lastadi.ContainerTestCase;
 
 import java.io.IOException;
-import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
-import java.security.spec.InvalidKeySpecException;
+import java.util.HashMap;
+import java.util.Map;
 
 public class GSuiteDataStoreTest extends ContainerTestCase {
 
@@ -54,6 +55,7 @@ public class GSuiteDataStoreTest extends ContainerTestCase {
 
     public void testProduction() throws Exception {
         // doDriveServiceTest();
+        // doStoreDataTest();
     }
 
     public void testPrivateKey() {
@@ -81,6 +83,48 @@ public class GSuiteDataStoreTest extends ContainerTestCase {
         } catch (final IOException e) {
             fail(e.getMessage());
         }
+    }
+
+    protected void doStoreDataTest() {
+        final DataConfig dataConfig = new DataConfig();
+        final IndexUpdateCallback callback = new IndexUpdateCallback() {
+            @Override
+            public void store(Map<String, String> paramMap, Map<String, Object> dataMap) {
+                System.out.println(dataMap);
+            }
+
+            @Override
+            public long getExecuteTime() {
+                return 0;
+            }
+
+            @Override
+            public long getDocumentSize() {
+                return 0;
+            }
+
+            @Override
+            public void commit() {
+            }
+        };
+        final Map<String, String> paramMap = new HashMap<>();
+        paramMap.put("project_id", "");
+        paramMap.put("private_key", "");
+        paramMap.put("private_key_id", "");
+        paramMap.put("client_email", "");
+        final Map<String, String> scriptMap = new HashMap<>();
+        final Map<String, Object> defaultDataMap = new HashMap<>();
+
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        scriptMap.put(fessConfig.getIndexFieldTitle(), "files.name");
+        scriptMap.put(fessConfig.getIndexFieldContent(), "files.description + \"\\n\" + files.contents");
+        scriptMap.put(fessConfig.getIndexFieldMimetype(), "files.mimetype");
+        scriptMap.put(fessConfig.getIndexFieldCreated(), "files.created_time");
+        scriptMap.put(fessConfig.getIndexFieldLastModified(), "files.modified_time");
+        scriptMap.put(fessConfig.getIndexFieldUrl(), "files.web_view_link");
+        scriptMap.put(fessConfig.getIndexFieldThumbnail(), "files.thumbnail_link");
+
+        dataStore.storeData(dataConfig, callback, paramMap, scriptMap, defaultDataMap);
     }
 
 }

@@ -19,6 +19,7 @@ import com.auth0.jwt.JWT;
 import com.auth0.jwt.algorithms.Algorithm;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
 import com.google.api.client.http.GenericUrl;
@@ -31,12 +32,15 @@ import com.google.api.client.util.GenericData;
 import com.google.api.client.util.PemReader;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.model.File;
+import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.StringReader;
@@ -46,9 +50,9 @@ import java.security.PrivateKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
-import java.util.Collections;
-import java.util.Date;
-import java.util.Map;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class GSuiteDataStore extends AbstractDataStore {
 
@@ -61,7 +65,20 @@ public class GSuiteDataStore extends AbstractDataStore {
     private static final String CLIENT_EMAIL_PARAM = "client_email";
 
     // scripts
-    protected static final String MESSAGE = "message";
+    private static final String FILES = "files";
+    private static final String FILES_NAME = "name";
+    private static final String FILES_DESCRIPTION = "description";
+    private static final String FILES_CONTENTS = "contents";
+    private static final String FILES_MIMETYPE = "mimetype";
+    private static final String FILES_THUMBNAIL_LINK = "thumbnail_link";
+    private static final String FILES_WEB_VIEW_LINK = "web_view_link";
+    private static final String FILES_CREATED_TIME = "created_time";
+    private static final String FILES_MODIFIED_TIME = "modified_time";
+
+    // other
+    private static final String[] FILES_FIELDS =
+            { "files/id", "files/name", "files/description", "files/mimeType", "files/thumbnailLink", "files/webViewLink",
+                    "files/createdTime", "files/modifiedTime" };
 
     protected String getName() {
         return "G Suite";
@@ -101,6 +118,98 @@ public class GSuiteDataStore extends AbstractDataStore {
             return;
         }
 
+        storeFiles(dataConfig, callback, paramMap, scriptMap, defaultDataMap, drive);
+
+    }
+
+    protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+            final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final Drive drive) {
+        try {
+            drive.files().list().setFields(String.join(",", FILES_FIELDS)).execute().getFiles().forEach(file -> {
+                processFile(dataConfig, callback, paramMap, scriptMap, defaultDataMap, drive, file);
+            });
+        } catch (final IOException e) {
+            logger.warn("Failed to store files", e);
+        }
+    }
+
+    protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+            final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final Drive drive, final File file) {
+        final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
+        final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
+        final Map<String, Object> fileMap = new HashMap<>();
+
+        try {
+            fileMap.put(FILES_NAME, file.getName());
+            fileMap.put(FILES_DESCRIPTION, file.getDescription());
+            fileMap.put(FILES_CONTENTS, getFileContents(drive, file));
+            fileMap.put(FILES_MIMETYPE, file.getMimeType());
+            fileMap.put(FILES_THUMBNAIL_LINK, file.getThumbnailLink());
+            fileMap.put(FILES_WEB_VIEW_LINK, file.getWebViewLink());
+            fileMap.put(FILES_CREATED_TIME, file.getCreatedTime());
+            fileMap.put(FILES_MODIFIED_TIME, file.getModifiedTime());
+            resultMap.put(FILES, fileMap);
+            for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
+                final Object convertValue = convertValue(entry.getValue(), resultMap);
+                if (convertValue != null) {
+                    dataMap.put(entry.getKey(), convertValue);
+                }
+            }
+            callback.store(paramMap, dataMap);
+        } catch (final CrawlingAccessException e) {
+            logger.warn("Crawling Access Exception at : " + dataMap, e);
+        }
+    }
+
+    protected static String getFileContents(final Drive drive, final File file) {
+        final StringBuilder sb = new StringBuilder();
+        final String id = file.getId();
+        final String mimeType = file.getMimeType();
+        final Matcher m = Pattern.compile("application/vnd\\.google-apps\\.(.*)").matcher(mimeType);
+        if (m.matches()) {
+            try (final ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                switch (m.group(1)) {
+                case "document":
+                case "presentation": {
+                    drive.files().export(id, "text/plain").executeMediaAndDownloadTo(out);
+                    sb.append(out.toString());
+                    break;
+                }
+                case "spreadsheet": {
+                    drive.files().export(id, "text/csv").executeMediaAndDownloadTo(out);
+                    sb.append(out.toString());
+                    break;
+                }
+                case "script": {
+                    drive.files().export(id, "application/vnd.google-apps.script+json").executeMediaAndDownloadTo(out);
+                    final Map<String, Object> map = new ObjectMapper().readValue(out.toString(), new TypeReference<Map<String, Object>>() {
+                    });
+                    if (map.containsKey("files")) {
+                        @SuppressWarnings("unchecked")
+                        final List<Map<String, Object>> files = (List<Map<String, Object>>) map.get("files");
+                        files.forEach(f -> {
+                            sb.append(f.getOrDefault("name", ""));
+                            sb.append("\n");
+                            sb.append(f.getOrDefault("source", ""));
+                        });
+                    }
+                    break;
+                }
+                }
+            } catch (final IOException e) {
+                logger.warn("Failed to get contents of '" + file.getName() + "'", e);
+            }
+        } else {
+            if (mimeType.matches("text/.*")) {
+                try (final ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+                    drive.files().get(id).executeMediaAndDownloadTo(out);
+                    sb.append(out.toString());
+                } catch (final IOException e) {
+                    logger.warn("Failed to get contents of '" + file.getName() + "'", e);
+                }
+            }
+        }
+        return sb.toString();
     }
 
     protected static PrivateKey getPrivateKey(final String privateKeyPem)
