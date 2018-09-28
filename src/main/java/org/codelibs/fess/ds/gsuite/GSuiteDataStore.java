@@ -29,7 +29,6 @@ import com.google.api.client.http.UrlEncodedContent;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.jackson2.JacksonFactory;
 import com.google.api.client.util.GenericData;
-import com.google.api.client.util.PemReader;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.File;
@@ -42,8 +41,6 @@ import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.Reader;
-import java.io.StringReader;
 import java.security.KeyFactory;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
@@ -105,7 +102,7 @@ public class GSuiteDataStore extends AbstractDataStore {
         final PrivateKey privateKey;
         try {
             privateKey = getPrivateKey(privateKeyPem);
-        } catch (IOException | NoSuchAlgorithmException | InvalidKeySpecException e) {
+        } catch (NoSuchAlgorithmException | InvalidKeySpecException e) {
             logger.warn("Failed to get '" + PRIVATE_KEY_PARAM + "'", e);
             return;
         }
@@ -212,11 +209,9 @@ public class GSuiteDataStore extends AbstractDataStore {
         return sb.toString();
     }
 
-    protected static PrivateKey getPrivateKey(final String privateKeyPem)
-            throws IOException, NoSuchAlgorithmException, InvalidKeySpecException {
-        final Reader reader = new StringReader(privateKeyPem);
-        final PemReader.Section section = PemReader.readFirstSectionAndClose(reader, "PRIVATE KEY");
-        final byte[] bytes = section.getBase64DecodedBytes();
+    protected static PrivateKey getPrivateKey(final String privateKeyPem) throws NoSuchAlgorithmException, InvalidKeySpecException {
+        final String replaced = privateKeyPem.replaceAll("\\\\n", "").replaceAll("-----[A-Z ]+-----", "");
+        final byte[] bytes = Base64.getDecoder().decode(replaced);
         final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
         final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
         return keyFactory.generatePrivate(keySpec);
