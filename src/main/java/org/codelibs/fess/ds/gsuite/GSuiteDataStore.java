@@ -143,8 +143,8 @@ public class GSuiteDataStore extends AbstractDataStore {
             fileMap.put(FILES_MIMETYPE, file.getMimeType());
             fileMap.put(FILES_THUMBNAIL_LINK, file.getThumbnailLink());
             fileMap.put(FILES_WEB_VIEW_LINK, file.getWebViewLink());
-            fileMap.put(FILES_CREATED_TIME, file.getCreatedTime());
-            fileMap.put(FILES_MODIFIED_TIME, file.getModifiedTime());
+            fileMap.put(FILES_CREATED_TIME, new Date(file.getCreatedTime().getValue()));
+            fileMap.put(FILES_MODIFIED_TIME, new Date(file.getModifiedTime().getValue()));
             resultMap.put(FILES, fileMap);
             for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
                 final Object convertValue = convertValue(entry.getValue(), resultMap);
