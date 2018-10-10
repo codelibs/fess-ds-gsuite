@@ -115,7 +115,7 @@ public class GSuiteDataStore extends AbstractDataStore {
 
     }
 
-    protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+    private void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final Drive drive) {
         try {
             drive.files().list().setFields(String.join(",", FILES_FIELDS)).execute().getFiles().forEach(file -> {
@@ -154,7 +154,7 @@ public class GSuiteDataStore extends AbstractDataStore {
         }
     }
 
-    protected static String getFileContents(final Drive drive, final File file) {
+    private static String getFileContents(final Drive drive, final File file) {
         final StringBuilder sb = new StringBuilder();
         final String id = file.getId();
         final String mimeType = file.getMimeType();
@@ -184,6 +184,7 @@ public class GSuiteDataStore extends AbstractDataStore {
                             sb.append(f.getOrDefault("name", ""));
                             sb.append("\n");
                             sb.append(f.getOrDefault("source", ""));
+                            sb.append("\n");
                         });
                     }
                     break;
@@ -205,16 +206,15 @@ public class GSuiteDataStore extends AbstractDataStore {
         return sb.toString();
     }
 
-    protected static PrivateKey getPrivateKey(final String privateKeyPem) throws NoSuchAlgorithmException, InvalidKeySpecException {
-        final String replaced = privateKeyPem.replaceAll("\\\\n", "").replaceAll("-----[A-Z ]+-----", "");
+    static PrivateKey getPrivateKey(final String privateKeyPem) throws NoSuchAlgorithmException, InvalidKeySpecException {
+        final String replaced = privateKeyPem.replaceAll("\\\\n|\\n|-----[A-Z ]+-----", "");
         final byte[] bytes = Base64.getDecoder().decode(replaced);
         final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
         final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
         return keyFactory.generatePrivate(keySpec);
     }
 
-    protected static Drive getDriveService(final PrivateKey privateKey, final String privateKeyId, final String clientEmail)
-            throws IOException {
+    static Drive getDriveService(final PrivateKey privateKey, final String privateKeyId, final String clientEmail) throws IOException {
         final long now = System.currentTimeMillis();
 
         final String jwt = JWT.create() //
@@ -255,23 +255,23 @@ public class GSuiteDataStore extends AbstractDataStore {
         @JsonProperty("error_description")
         private String errorDescription;
 
-        public String getAccessToken() {
+        String getAccessToken() {
             return accessToken;
         }
 
-        public Integer getExpiresIn() {
+        Integer getExpiresIn() {
             return expiresIn;
         }
 
-        public String getTokenType() {
+        String getTokenType() {
             return tokenType;
         }
 
-        public String getError() {
+        String getError() {
             return error;
         }
 
-        public String getErrorDescription() {
+        String getErrorDescription() {
             return errorDescription;
         }
     }

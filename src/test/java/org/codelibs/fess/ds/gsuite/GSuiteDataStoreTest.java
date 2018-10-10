@@ -29,7 +29,7 @@ import java.util.Map;
 
 public class GSuiteDataStoreTest extends ContainerTestCase {
 
-    public GSuiteDataStore dataStore;
+    private GSuiteDataStore dataStore;
 
     @Override
     protected String prepareConfigFile() {
