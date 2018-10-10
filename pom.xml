@@ -126,7 +126,6 @@
 								<includes>
 									<include>com.auth0:java-jwt</include>
 									<include>com.google.apis:google-api-services-drive</include>
-									<include>com.google.api-client:google-api-client</include>
 								</includes>
 							</artifactSet>
 						</configuration>

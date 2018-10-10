@@ -19,7 +19,6 @@ See [Maven Repository](http://central.maven.org/maven2/org/codelibs/fess/fess-ds
 ### Parameters
 
 ```
-project_id=****
 private_key=-----BEGIN PRIVATE KEY-----\nMIIEv...=\n-----END PRIVATE KEY-----\n
 private_key_id=46812...b33f8
 client_email=****@****.iam.gserviceaccount.com"

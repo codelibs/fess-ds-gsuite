@@ -21,7 +21,6 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
 import com.google.api.client.http.GenericUrl;
 import com.google.api.client.http.HttpContent;
 import com.google.api.client.http.HttpResponse;
@@ -56,7 +55,6 @@ public class GSuiteDataStore extends AbstractDataStore {
     private static final Logger logger = LoggerFactory.getLogger(GSuiteDataStore.class);
 
     // parameters
-    private static final String PROJECT_ID_PARAM = "project_id";
     private static final String PRIVATE_KEY_PARAM = "private_key";
     private static final String PRIVATE_KEY_ID_PARAM = "private_key_id";
     private static final String CLIENT_EMAIL_PARAM = "client_email";
@@ -85,14 +83,12 @@ public class GSuiteDataStore extends AbstractDataStore {
     protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
 
-        final String projectId = paramMap.getOrDefault(PROJECT_ID_PARAM, "");
         final String privateKeyPem = paramMap.getOrDefault(PRIVATE_KEY_PARAM, "");
         final String privateKeyId = paramMap.getOrDefault(PRIVATE_KEY_ID_PARAM, "");
         final String clientEmail = paramMap.getOrDefault(CLIENT_EMAIL_PARAM, "");
 
-        if (projectId.isEmpty() || privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
+        if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
             logger.warn("parameter '" + //
-                    PROJECT_ID_PARAM + "', '" + //
                     PRIVATE_KEY_PARAM + "', '" + //
                     PRIVATE_KEY_ID_PARAM + "', '" + //
                     CLIENT_EMAIL_PARAM + "' is required");
@@ -109,7 +105,7 @@ public class GSuiteDataStore extends AbstractDataStore {
 
         final Drive drive;
         try {
-            drive = getDriveService(projectId, privateKey, privateKeyId, clientEmail);
+            drive = getDriveService(privateKey, privateKeyId, clientEmail);
         } catch (final IOException e) {
             logger.warn("Failed to get Drive Service", e);
             return;
@@ -130,7 +126,7 @@ public class GSuiteDataStore extends AbstractDataStore {
         }
     }
 
-    protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+    private void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap, final Drive drive, final File file) {
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
@@ -217,14 +213,8 @@ public class GSuiteDataStore extends AbstractDataStore {
         return keyFactory.generatePrivate(keySpec);
     }
 
-    protected static Drive getDriveService(final String projectId, final PrivateKey privateKey, final String privateKeyId,
-            final String clientEmail) throws IOException {
-        final GoogleCredential credential = new GoogleCredential.Builder() //
-                .setTransport(new NetHttpTransport()).setJsonFactory(new JacksonFactory()).setServiceAccountId(clientEmail)
-                .setServiceAccountScopes(Collections.emptyList()).setServiceAccountPrivateKey(privateKey)
-                .setServiceAccountPrivateKeyId(privateKeyId).setTokenServerEncodedUrl("https://oauth2.googleapis.com/token")
-                .setServiceAccountProjectId(projectId).build();
-
+    protected static Drive getDriveService(final PrivateKey privateKey, final String privateKeyId, final String clientEmail)
+            throws IOException {
         final long now = System.currentTimeMillis();
 
         final String jwt = JWT.create() //

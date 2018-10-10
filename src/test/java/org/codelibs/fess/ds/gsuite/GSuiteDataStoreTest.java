@@ -69,14 +69,13 @@ public class GSuiteDataStoreTest extends ContainerTestCase {
     }
 
     protected void doDriveServiceTest() throws Exception {
-        final String projectId = "";
         final String privateKeyPem = "";
         final String privateKeyId = "";
         final String clientEmail = "";
         final PrivateKey privateKey = GSuiteDataStore.getPrivateKey(privateKeyPem);
 
         try {
-            final Drive drive = GSuiteDataStore.getDriveService(projectId, privateKey, privateKeyId, clientEmail);
+            final Drive drive = GSuiteDataStore.getDriveService(privateKey, privateKeyId, clientEmail);
             drive.files().list().execute().getFiles().forEach(f -> {
                 System.out.println(f.getName());
             });
@@ -108,7 +107,6 @@ public class GSuiteDataStoreTest extends ContainerTestCase {
             }
         };
         final Map<String, String> paramMap = new HashMap<>();
-        paramMap.put("project_id", "");
         paramMap.put("private_key", "");
         paramMap.put("private_key_id", "");
         paramMap.put("client_email", "");
