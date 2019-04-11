@@ -52,7 +52,7 @@
 		<jackson.version>2.8.11</jackson.version>
 		<commons.fileupload.version>1.3.3</commons.fileupload.version>
 		<asm.version>5.1</asm.version>
-		<google.apis.version>v3-rev130-1.25.0</google.apis.version>
+		<google.apis.version>v3-rev157-1.25.0</google.apis.version>
 		<java.jwt.version>3.4.0</java.jwt.version>
 
 		<!-- Testing -->

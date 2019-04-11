@@ -31,6 +31,8 @@ import com.google.api.client.util.GenericData;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.File;
+
+import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
@@ -83,9 +85,9 @@ public class GSuiteDataStore extends AbstractDataStore {
     protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
 
-        final String privateKeyPem = paramMap.getOrDefault(PRIVATE_KEY_PARAM, "");
-        final String privateKeyId = paramMap.getOrDefault(PRIVATE_KEY_ID_PARAM, "");
-        final String clientEmail = paramMap.getOrDefault(CLIENT_EMAIL_PARAM, "");
+        final String privateKeyPem = paramMap.getOrDefault(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
+        final String privateKeyId = paramMap.getOrDefault(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
+        final String clientEmail = paramMap.getOrDefault(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
 
         if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
             logger.warn("parameter '" + //
