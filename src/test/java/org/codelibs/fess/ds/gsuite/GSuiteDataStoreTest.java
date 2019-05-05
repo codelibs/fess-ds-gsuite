@@ -20,7 +20,7 @@ import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
 
 public class GSuiteDataStoreTest extends LastaFluteTestCase {
 
-    private GSuiteDataStore dataStore;
+    private GoogleDriveDataStore dataStore;
 
     @Override
     protected String prepareConfigFile() {
@@ -35,7 +35,7 @@ public class GSuiteDataStoreTest extends LastaFluteTestCase {
     @Override
     public void setUp() throws Exception {
         super.setUp();
-        dataStore = new GSuiteDataStore();
+        dataStore = new GoogleDriveDataStore();
     }
 
     @Override
