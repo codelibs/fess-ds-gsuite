@@ -50,9 +50,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.services.drive.model.File;
 
-public class GSuiteDataStore extends AbstractDataStore {
+public class GoogleDriveDataStore extends AbstractDataStore {
 
-    private static final Logger logger = LoggerFactory.getLogger(GSuiteDataStore.class);
+    private static final Logger logger = LoggerFactory.getLogger(GoogleDriveDataStore.class);
 
     protected static final long DEFAULT_MAX_SIZE = 10000000L; // 10m
 
@@ -183,7 +183,7 @@ public class GSuiteDataStore extends AbstractDataStore {
 
     @Override
     protected String getName() {
-        return "GSuite";
+        return "GoogleDrive";
     }
 
     @Override
@@ -317,7 +317,7 @@ public class GSuiteDataStore extends AbstractDataStore {
             fileMap.put(FILE_LAST_MODIFIYING_USER, file.getLastModifyingUser());
             fileMap.put(FILE_MD5_CHECKSUM, file.getMd5Checksum());
             fileMap.put(FILE_MODIFIED_BY_ME, file.getModifiedByMe());
-            fileMap.put(FILE_MODIFIED_BY_ME_TIME, new Date(file.getModifiedByMeTime().getValue()));
+            fileMap.put(FILE_MODIFIED_BY_ME_TIME, toDate(file.getModifiedByMeTime()));
             fileMap.put(FILE_ORIGINAL_FILENAME, file.getOriginalFilename());
             fileMap.put(FILE_OWNED_BY_ME, file.getOwnedByMe());
             fileMap.put(FILE_OWNERS, file.getOwners());
@@ -327,17 +327,17 @@ public class GSuiteDataStore extends AbstractDataStore {
             fileMap.put(FILE_TEAM_DRIVE_ID, file.getTeamDriveId());
             fileMap.put(FILE_THUMBNAIL_VERSION, file.getThumbnailVersion());
             fileMap.put(FILE_TRASHED, file.getTrashed());
-            fileMap.put(FILE_TRASHED_TIME, new Date(file.getTrashedTime().getValue()));
+            fileMap.put(FILE_TRASHED_TIME, toDate(file.getTrashedTime()));
             fileMap.put(FILE_TRASHING_USER, file.getTrashingUser());
             fileMap.put(FILE_VERSION, file.getVersion());
             fileMap.put(FILE_VIDEO_MEDIA_METADATA, file.getVideoMediaMetadata());
             fileMap.put(FILE_VIEWED_BY_ME, file.getViewedByMe());
-            fileMap.put(FILE_VIEWED_BY_ME_TIME, new Date(file.getViewedByMeTime().getValue()));
+            fileMap.put(FILE_VIEWED_BY_ME_TIME, toDate(file.getViewedByMeTime()));
             fileMap.put(FILE_VIEWERS_CAN_COPY_CONTENT, file.getViewersCanCopyContent());
             fileMap.put(FILE_WRITERS_CAN_SHARE, file.getWritersCanShare());
             fileMap.put(FILE_THUMBNAIL_LINK, file.getThumbnailLink());
-            fileMap.put(FILE_CREATED_TIME, new Date(file.getCreatedTime().getValue()));
-            fileMap.put(FILE_MODIFIED_TIME, new Date(file.getModifiedTime().getValue()));
+            fileMap.put(FILE_CREATED_TIME, toDate(file.getCreatedTime()));
+            fileMap.put(FILE_MODIFIED_TIME, toDate(file.getModifiedTime()));
 
             final List<String> permissions = getFilePermissions(client, file);
             final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
@@ -388,6 +388,13 @@ public class GSuiteDataStore extends AbstractDataStore {
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), url, t);
         }
+    }
+
+    protected Date toDate(com.google.api.client.util.DateTime date) {
+        if (date == null) {
+            return null;
+        }
+        return new Date(date.getValue());
     }
 
     protected List<String> getFilePermissions(final GSuiteClient client, final File file) {
@@ -458,7 +465,7 @@ public class GSuiteDataStore extends AbstractDataStore {
             final TikaExtractor extractor = ComponentUtil.getComponent(extractorName);
             return extractor.getText(in, null).getContent();
         } catch (final Exception e) {
-            throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents of DriveItem: " + file.getName(), e);
+            throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents: " + file.getName(), e);
         }
     }
 
