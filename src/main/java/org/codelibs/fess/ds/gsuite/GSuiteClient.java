@@ -170,6 +170,9 @@ public class GSuiteClient {
     }
 
     public void getFiles(final String q, final String corpora, final String spaces, final String fields, final Consumer<File> consumer) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("query: {}, corpora: {}, spaces: {}, fields: {}", q, corpora, spaces, fields);
+        }
         long counter = 1;
         String pageToken = null;
         try {
@@ -191,10 +194,10 @@ public class GSuiteClient {
                     logger.debug("Accessing files: {}=>{}", counter, pageToken);
                 }
                 final FileList result = list.execute();
+                if (logger.isDebugEnabled()) {
+                    logger.debug("filelist: " + result);
+                }
                 for (final File file : result.getFiles()) {
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("File: {}:{}", file.getId(), file.getName());
-                    }
                     consumer.accept(file);
                 }
                 pageToken = result.getNextPageToken();

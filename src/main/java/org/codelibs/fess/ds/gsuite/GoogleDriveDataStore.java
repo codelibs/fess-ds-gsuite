@@ -16,7 +16,7 @@
 package org.codelibs.fess.ds.gsuite;
 
 import java.io.InputStream;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -24,7 +24,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import org.codelibs.core.lang.StringUtil;
@@ -41,7 +40,6 @@ import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.helper.PermissionHelper;
-import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -49,6 +47,8 @@ import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.services.drive.model.File;
+import com.google.api.services.drive.model.Permission;
+import com.google.api.services.drive.model.User;
 
 public class GoogleDriveDataStore extends AbstractDataStore {
 
@@ -120,66 +120,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String FILE_SIZE = "size";
     protected static final String FILE_ROLES = "roles";
 
-    // other
-    protected static final String FILE_FIELDS = "nextPageToken,files("//
-            + String.join(",", //
-                    "appProperties", //
-                    "capabilities", //
-                    "contentHints", //
-                    "copyRequiresWriterPermission", //
-                    "createdTime", //
-                    "description", //
-                    "explicitlyTrashed", //
-                    "exportLinks", //
-                    "fileExtension", //
-                    "folderColorRgb", //
-                    "fullFileExtension", //
-                    "hasAugmentedPermissions", //
-                    "hasThumbnail", //
-                    "headRevisionId", //
-                    "iconLink", //
-                    "id", //
-                    "imageMediaMetadata", //
-                    "isAppAuthorized", //
-                    "kind", //
-                    "lastModifyingUser", //
-                    "md5Checksum", //
-                    "mimeType", //
-                    "modifiedByMe", //
-                    "modifiedByMeTime", //
-                    "modifiedTime", //
-                    "name", //
-                    "originalFilename", //
-                    "ownedByMe", //
-                    "owners", //
-                    "parents", //
-                    "permissionIds", //
-                    "permissions", //
-                    "properties", //
-                    "quotaBytesUsed", //
-                    "shared", //
-                    "sharedWithMeTime", //
-                    "sharingUser", //
-                    "size", //
-                    "spaces", //
-                    "starred", //
-                    "teamDriveId", //
-                    "thumbnailLink", //
-                    "thumbnailVersion", //
-                    "trashed", //
-                    "trashedTime", //
-                    "trashingUser", //
-                    "version", //
-                    "videoMediaMetadata", //
-                    "viewedByMe", //
-                    "viewedByMeTime", //
-                    "viewersCanCopyContent", //
-                    "webContentLink", //
-                    "webViewLink", //
-                    "writersCanShare")
-            + ")";
-
     protected String extractorName = "tikaExtractor";
+
+    // other
+    protected static final String FILE_FIELDS = "*";
 
     @Override
     protected String getName() {
@@ -247,7 +191,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String query = paramMap.get("query");
         final String corpora = paramMap.get("corpora");
         final String spaces = paramMap.get("spaces");
-        client.getFiles(query, corpora, spaces, FILE_FIELDS, file -> {
+        final String fields = paramMap.getOrDefault("fields", FILE_FIELDS);
+        client.getFiles(query, corpora, spaces, fields, file -> {
             processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file);
         });
     }
@@ -255,6 +200,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final File file) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("file: " + file);
+        }
         final String mimetype = file.getMimeType();
         if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
             if (logger.isDebugEnabled()) {
@@ -398,22 +346,44 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     protected List<String> getFilePermissions(final GSuiteClient client, final File file) {
-        if (file.getPermissions() == null) {
-            return Collections.emptyList();
+        final List<String> permissionList = new ArrayList<>();
+        if (file.getPermissions() != null) {
+            file.getPermissions().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
         }
-        final SystemHelper systemHelper = ComponentUtil.getSystemHelper();
-        return file.getPermissions().stream().map(permission -> {
-            if ("user".equals(permission.getType())) {
-                return systemHelper.getSearchRoleByUser(permission.getId());
-            } else if ("group".equals(permission.getType())) {
-                return systemHelper.getSearchRoleByGroup(permission.getId());
-            } else if ("domain".equals(permission.getType())) {
-                return systemHelper.getSearchRoleByGroup(permission.getId());
-            } else if ("anyone".equals(permission.getType())) {
-                return systemHelper.getSearchRoleByUser("guest");
-            }
+        if (file.getOwners() != null) {
+            file.getOwners().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
+        }
+        return permissionList;
+    }
+
+    protected String getPermission(final User user) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("user: " + user);
+        }
+        return getPermission("user", user.getEmailAddress());
+    }
+
+    protected String getPermission(final Permission permission) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("permission: " + permission);
+        }
+        if (Boolean.TRUE.equals(permission.getDeleted())) {
             return null;
-        }).filter(s -> s != null).collect(Collectors.toList());
+        }
+        return getPermission(permission.getType(), permission.getEmailAddress());
+    }
+
+    protected String getPermission(final String type, final String value) {
+        if ("user".equals(type)) {
+            return ComponentUtil.getSystemHelper().getSearchRoleByUser(value);
+        } else if ("group".equals(type)) {
+            return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
+        } else if ("domain".equals(type)) {
+            return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
+        } else if ("anyone".equals(type)) {
+            return ComponentUtil.getSystemHelper().getSearchRoleByUser("guest");
+        }
+        return null;
     }
 
     protected String getUrl(final Map<String, Object> configMap, final Map<String, String> paramMap, final File file) {
