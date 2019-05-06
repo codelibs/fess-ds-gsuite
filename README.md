@@ -29,22 +29,26 @@ The keys correspond the keys of json including credentials of your service accou
 ### Scripts
 
 ```
-title=files.name
-content=files.description+"\n"+files.contents
-mimetype=files.mimetype
-created=files.created_time
-modified=files.modified_time
-url=files.web_view_link
-thumbnail=files.thumbnail_link
+title=file.name
+content=file.description+"\n"+file.contents
+mimetype=file.mimetype
+created=file.created_time
+last_modified=file.modified_time
+url=file.url
+thumbnail=file.thumbnail_link
+content_length=file.size
+filetype=file.filetype
+role=file.roles
+filename=file.name
 ```
 
 | Key | Value |
 | --- | --- |
-| files.name | The name of the file. |
-| files.description | A short description of the file. |
-| files.contents | The text contents of the File |
-| files.mimetype | The MIME type of the file. |
-| files.created_time | The time at which the file was created. |
-| files.modified_time | The last time the file was modified by anyone. |
-| files.web_view_link | A link for opening the file in a relevant Google editor or viewer in a browser. |
-| files.thumbnail_link | A short-lived link to the file's thumbnail, if available. Typically lasts on the order of hours. Only populated when the requesting app can access the file's content. |
+| file.name | The name of the file. |
+| file.description | A short description of the file. |
+| file.contents | The text contents of the File |
+| file.mimetype | The MIME type of the file. |
+| file.created_time | The time at which the file was created. |
+| file.modified_time | The last time the file was modified by anyone. |
+| file.web_view_link | A link for opening the file in a relevant Google editor or viewer in a browser. |
+| file.thumbnail_link | A short-lived link to the file's thumbnail, if available. Typically lasts on the order of hours. Only populated when the requesting app can access the file's content. |
