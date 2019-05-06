@@ -35,6 +35,9 @@ import java.util.function.Consumer;
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
 import org.codelibs.core.lang.StringUtil;
+import org.codelibs.core.timer.TimeoutManager;
+import org.codelibs.core.timer.TimeoutTarget;
+import org.codelibs.core.timer.TimeoutTask;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
@@ -50,6 +53,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.client.googleapis.GoogleUtils;
 import com.google.api.client.http.GenericUrl;
 import com.google.api.client.http.HttpContent;
+import com.google.api.client.http.HttpRequest;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpResponse;
 import com.google.api.client.http.UrlEncodedContent;
@@ -63,7 +67,7 @@ import com.google.api.services.drive.Drive.Files.List;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
 
-public class GSuiteClient {
+public class GSuiteClient implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(GSuiteClient.class);
 
@@ -72,20 +76,37 @@ public class GSuiteClient {
     protected static final String CLIENT_EMAIL_PARAM = "client_email";
     protected static final String PROXY_PORT = "proxy_port";
     protected static final String PROXY_HOST = "proxy_host";
-    protected static final String TOKEN_EXPIRES = "token_expires";
+    protected static final String REFRESH_TOKEN_INTERVAL = "refresh_token_interval";
+    protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
 
     protected Drive drive;
-    protected final NetHttpTransport httpTransport;
-    protected final Map<String, String> params;
+    protected NetHttpTransport httpTransport;
+    protected Map<String, String> params;
 
-    private int maxCachedContentSize = 1024 * 1024;
+    protected int maxCachedContentSize = 1024 * 1024;
+
+    protected RequestInitializer requestInitializer;
+
+    protected TimeoutTask refreshTokenTask;
+
+    protected String applicationName = "Fess DataStore";
 
     public GSuiteClient(final Map<String, String> params) {
         this.params = params;
         this.httpTransport = newHttpTransport();
-        final String size = params.get("max_cached_content_size");
+        final String size = params.get(MAX_CACHED_CONTENT_SIZE);
         if (StringUtil.isNotBlank(size)) {
             maxCachedContentSize = Integer.parseInt(size);
+        }
+        requestInitializer = new RequestInitializer(params, httpTransport);
+        refreshTokenTask = TimeoutManager.getInstance().addTimeoutTarget(requestInitializer,
+                Integer.parseInt(params.getOrDefault(REFRESH_TOKEN_INTERVAL, "3540")), true);
+    }
+
+    @Override
+    public void close() {
+        if (refreshTokenTask != null) {
+            refreshTokenTask.cancel();
         }
     }
 
@@ -103,62 +124,9 @@ public class GSuiteClient {
         }
     }
 
-    protected PrivateKey getPrivateKey(final String privateKeyPem) throws NoSuchAlgorithmException, InvalidKeySpecException {
-        final String replaced = privateKeyPem.replaceAll("\\\\n|\\n|-----[A-Z ]+-----", StringUtil.EMPTY);
-        final byte[] bytes = Base64.getDecoder().decode(replaced);
-        final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
-        final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
-        return keyFactory.generatePrivate(keySpec);
-    }
-
-    protected HttpRequestInitializer authorize() {
-        final String privateKeyPem = params.getOrDefault(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
-        final String privateKeyId = params.getOrDefault(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
-        final String clientEmail = params.getOrDefault(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
-
-        if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
-            throw new DataStoreException("parameter '" + //
-                    PRIVATE_KEY_PARAM + "', '" + //
-                    PRIVATE_KEY_ID_PARAM + "', '" + //
-                    CLIENT_EMAIL_PARAM + "' is required");
-        }
-
-        long expires = Long.parseLong(params.getOrDefault(TOKEN_EXPIRES, "3600000"));
-
-        final long now = System.currentTimeMillis();
-        try {
-            final String jwt = JWT.create() //
-                    .withKeyId(privateKeyId) //
-                    .withIssuer(clientEmail) //
-                    .withSubject(clientEmail) //
-                    .withAudience("https://www.googleapis.com/oauth2/v4/token") //
-                    .withClaim("scope", "https://www.googleapis.com/auth/drive") //
-                    .withIssuedAt(new Date(now)) //
-                    .withExpiresAt(new Date(now + expires)) //
-                    .sign(Algorithm.RSA256(null, (RSAPrivateKey) getPrivateKey(privateKeyPem)));
-
-            final GenericUrl url = new GenericUrl("https://www.googleapis.com/oauth2/v4/token");
-            final GenericData data = new GenericData();
-            data.set("assertion", jwt);
-            data.set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
-            final HttpContent content = new UrlEncodedContent(data);
-            final HttpResponse response = httpTransport.createRequestFactory().buildPostRequest(url, content).execute();
-            try {
-                final ObjectMapper mapper = new ObjectMapper();
-                final TokenResponse token = mapper.readValue(response.getContent(), TokenResponse.class);
-
-                return request -> request.getHeaders().setAuthorization("Bearer " + token.getAccessToken());
-            } finally {
-                response.disconnect();
-            }
-        } catch (final Exception e) {
-            throw new DataStoreException("Failed to authorize GSuite API.", e);
-        }
-    }
-
     protected Drive createGlobalDrive() {
-        return new Drive.Builder(httpTransport, new JacksonFactory(), authorize())//
-                .setApplicationName("Fess DataStore") //
+        return new Drive.Builder(httpTransport, new JacksonFactory(), requestInitializer)//
+                .setApplicationName(applicationName) //
                 .build();
     }
 
@@ -195,7 +163,7 @@ public class GSuiteClient {
                 }
                 final FileList result = list.execute();
                 if (logger.isDebugEnabled()) {
-                    logger.debug("filelist: " + result);
+                    logger.debug("filelist: {}", result);
                 }
                 for (final File file : result.getFiles()) {
                     consumer.accept(file);
@@ -234,7 +202,7 @@ public class GSuiteClient {
     }
 
     @JsonIgnoreProperties(ignoreUnknown = true)
-    static class TokenResponse {
+    protected static class TokenResponse {
         @JsonProperty("access_token")
         private String accessToken;
         @JsonProperty("expires_in")
@@ -266,4 +234,102 @@ public class GSuiteClient {
         }
     }
 
+    protected static class RequestInitializer implements HttpRequestInitializer, TimeoutTarget {
+
+        protected NetHttpTransport httpTransport;
+
+        protected String privateKeyPem;
+        protected String privateKeyId;
+        protected String clientEmail;
+        protected String accessToken;
+
+        protected RequestInitializer(final Map<String, String> params, final NetHttpTransport httpTransport) {
+            this.httpTransport = httpTransport;
+
+            privateKeyPem = params.getOrDefault(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
+            privateKeyId = params.getOrDefault(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
+            clientEmail = params.getOrDefault(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
+            if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
+                throw new DataStoreException("parameter '" + //
+                        PRIVATE_KEY_PARAM + "', '" + //
+                        PRIVATE_KEY_ID_PARAM + "', '" + //
+                        CLIENT_EMAIL_PARAM + "' is required");
+            }
+
+            refreshToken();
+        }
+
+        protected void refreshToken() {
+            if (httpTransport == null) {
+                return;
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Refreshing access token.");
+            }
+            final long now = System.currentTimeMillis();
+            try {
+                final String jwt = JWT.create() //
+                        .withKeyId(privateKeyId) //
+                        .withIssuer(clientEmail) //
+                        .withSubject(clientEmail) //
+                        .withAudience("https://www.googleapis.com/oauth2/v4/token") //
+                        .withClaim("scope", "https://www.googleapis.com/auth/drive") //
+                        .withIssuedAt(new Date(now)) //
+                        .withExpiresAt(new Date(now + 3600000L)) //
+                        .sign(Algorithm.RSA256(null, (RSAPrivateKey) getPrivateKey()));
+                if (logger.isDebugEnabled()) {
+                    logger.debug("jwt: {}", jwt);
+                }
+                final GenericUrl url = new GenericUrl("https://www.googleapis.com/oauth2/v4/token");
+                final GenericData data = new GenericData();
+                data.set("assertion", jwt);
+                data.set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
+                final HttpContent content = new UrlEncodedContent(data);
+                final HttpResponse response = httpTransport.createRequestFactory().buildPostRequest(url, content).execute();
+                if (logger.isDebugEnabled()) {
+                    logger.debug("response: {}", response);
+                }
+                try {
+                    final ObjectMapper mapper = new ObjectMapper();
+                    final TokenResponse token = mapper.readValue(response.getContent(), TokenResponse.class);
+
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Update: {} -> {}", accessToken, token.getAccessToken());
+                    }
+                    accessToken = token.getAccessToken();
+                } finally {
+                    response.disconnect();
+                }
+            } catch (final Exception e) {
+                throw new DataStoreException("Failed to authorize GSuite API.", e);
+            }
+        }
+
+        protected PrivateKey getPrivateKey() throws NoSuchAlgorithmException, InvalidKeySpecException {
+            final String replaced = privateKeyPem.replaceAll("\\\\n|\\n|-----[A-Z ]+-----", StringUtil.EMPTY);
+            final byte[] bytes = Base64.getDecoder().decode(replaced);
+            final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
+            final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
+            return keyFactory.generatePrivate(keySpec);
+        }
+
+        @Override
+        public void expired() {
+            try {
+                refreshToken();
+            } catch (final Exception e) {
+                logger.warn("Failed to refresh an access token.", e);
+            }
+        }
+
+        @Override
+        public void initialize(final HttpRequest request) throws IOException {
+            request.getHeaders().setAuthorization("Bearer " + accessToken);
+        }
+
+    }
+
+    public void setApplicationName(final String applicationName) {
+        this.applicationName = applicationName;
+    }
 }

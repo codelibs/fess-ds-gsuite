@@ -22,6 +22,9 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -33,7 +36,7 @@ import org.codelibs.fess.app.service.FailureUrlService;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
 import org.codelibs.fess.crawler.exception.MultipleCrawlingAccessException;
-import org.codelibs.fess.crawler.extractor.impl.TikaExtractor;
+import org.codelibs.fess.crawler.extractor.Extractor;
 import org.codelibs.fess.crawler.filter.UrlFilter;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
@@ -59,11 +62,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     // parameters
     protected static final String MAX_SIZE = "max_size";
     protected static final String IGNORE_FOLDER = "ignore_folder";
+    protected static final String IGNORE_ERROR = "ignore_error";
     protected static final String SUPPORTED_MIMETYPES = "supported_mimetypes";
     protected static final String INCLUDE_PATTERN = "include_pattern";
     protected static final String EXCLUDE_PATTERN = "exclude_pattern";
     protected static final String URL_FILTER = "url_filter";
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
+    protected static final String NUMBER_OF_THREADS = "number_of_threads";
 
     // scripts
     protected static final String FILE = "file";
@@ -137,13 +142,16 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final Map<String, Object> configMap = new HashMap<>();
         configMap.put(MAX_SIZE, getMaxSize(paramMap));
         configMap.put(IGNORE_FOLDER, isIgnoreFolder(paramMap));
+        configMap.put(IGNORE_ERROR, isIgnoreError(paramMap));
         configMap.put(SUPPORTED_MIMETYPES, getSupportedMimeTypes(paramMap));
         configMap.put(URL_FILTER, getUrlFilter(paramMap));
         if (logger.isDebugEnabled()) {
             logger.debug("configMap: {}", configMap);
         }
 
-        storeFiles(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, createClient(paramMap));
+        try (final GSuiteClient client = createClient(paramMap)) {
+            storeFiles(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client);
+        }
     }
 
     protected GSuiteClient createClient(final Map<String, String> paramMap) {
@@ -152,6 +160,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     protected boolean isIgnoreFolder(final Map<String, String> paramMap) {
         return paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE).equalsIgnoreCase(Constants.TRUE);
+    }
+
+    protected boolean isIgnoreError(final Map<String, String> paramMap) {
+        return paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE).equalsIgnoreCase(Constants.TRUE);
     }
 
     protected long getMaxSize(final Map<String, String> paramMap) {
@@ -175,14 +187,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
         urlFilter.init(paramMap.get(Constants.CRAWLING_INFO_ID));
         if (logger.isDebugEnabled()) {
-            logger.debug("urlFilter: " + urlFilter);
+            logger.debug("urlFilter: {}", urlFilter);
         }
         return urlFilter;
     }
 
     protected String[] getSupportedMimeTypes(final Map<String, String> paramMap) {
         return StreamUtil.split(paramMap.getOrDefault(SUPPORTED_MIMETYPES, ".*"), ",")
-                .get(stream -> stream.map(s -> s.trim()).toArray(n -> new String[n]));
+                .get(stream -> stream.map(String::trim).toArray(n -> new String[n]));
     }
 
     protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
@@ -192,16 +204,29 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String corpora = paramMap.get("corpora");
         final String spaces = paramMap.get("spaces");
         final String fields = paramMap.getOrDefault("fields", FILE_FIELDS);
-        client.getFiles(query, corpora, spaces, fields, file -> {
-            processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file);
-        });
+        final ExecutorService executorService =
+                Executors.newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));
+        try {
+            client.getFiles(query, corpora, spaces, fields, file -> {
+                executorService
+                        .execute(() -> processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file));
+
+            });
+            executorService.awaitTermination(60, TimeUnit.SECONDS);
+        } catch (final InterruptedException e) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Interrupted.", e);
+            }
+        } finally {
+            executorService.shutdown();
+        }
     }
 
     protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final File file) {
         if (logger.isDebugEnabled()) {
-            logger.debug("file: " + file);
+            logger.debug("file: {}", file);
         }
         final String mimetype = file.getMimeType();
         if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
@@ -211,18 +236,26 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             return;
         }
 
-        final String url = getUrl(configMap, paramMap, file);
-        final UrlFilter urlFilter = (UrlFilter) configMap.get(URL_FILTER);
-        if (urlFilter != null && !urlFilter.match(url)) {
+        final String[] supportedMimeTypes = (String[]) configMap.get(SUPPORTED_MIMETYPES);
+        if (!Stream.of(supportedMimeTypes).anyMatch(mimetype::matches)) {
             if (logger.isDebugEnabled()) {
-                logger.debug("Not matched: " + url);
+                logger.debug("{} is not an indexing target.", mimetype);
             }
             return;
         }
 
-        logger.info("Crawling URL: " + url);
+        final String url = getUrl(configMap, paramMap, file);
+        final UrlFilter urlFilter = (UrlFilter) configMap.get(URL_FILTER);
+        if (urlFilter != null && !urlFilter.match(url)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Not matched: {}", url);
+            }
+            return;
+        }
 
-        final String[] supportedMimeTypes = (String[]) configMap.get(SUPPORTED_MIMETYPES);
+        logger.info("Crawling URL: {}", url);
+
+        final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR)).booleanValue();
 
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
@@ -237,7 +270,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final String filetype = ComponentUtil.getFileTypeHelper().get(mimetype);
             fileMap.put(FILE_NAME, file.getName());
             fileMap.put(FILE_DESCRIPTION, file.getDescription() != null ? file.getDescription() : "");
-            fileMap.put(FILE_CONTENTS, getFileContents(client, file, supportedMimeTypes));
+            fileMap.put(FILE_CONTENTS, getFileContents(client, file, ignoreError));
             fileMap.put(FILE_MIMETYPE, mimetype);
             fileMap.put(FILE_FILETYPE, filetype);
             fileMap.put(FILE_SIZE, file.getSize());
@@ -338,7 +371,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
-    protected Date toDate(com.google.api.client.util.DateTime date) {
+    protected Date toDate(final com.google.api.client.util.DateTime date) {
         if (date == null) {
             return null;
         }
@@ -358,14 +391,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     protected String getPermission(final User user) {
         if (logger.isDebugEnabled()) {
-            logger.debug("user: " + user);
+            logger.debug("user: {}", user);
         }
         return getPermission("user", user.getEmailAddress());
     }
 
     protected String getPermission(final Permission permission) {
         if (logger.isDebugEnabled()) {
-            logger.debug("permission: " + permission);
+            logger.debug("permission: {}", permission);
         }
         if (Boolean.TRUE.equals(permission.getDeleted())) {
             return null;
@@ -390,14 +423,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return file.getWebContentLink();
     }
 
-    protected String getFileContents(final GSuiteClient client, final File file, final String[] supportedMimeTypes) {
+    protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
         final String mimeType = file.getMimeType();
-        if (!Stream.of(supportedMimeTypes).anyMatch(s -> mimeType.matches(s))) {
-            if (logger.isDebugEnabled()) {
-                logger.debug(mimeType + " does not match.");
-            }
-            return StringUtil.EMPTY;
-        }
         final String id = file.getId();
         final Matcher m = Pattern.compile("application/vnd\\.google-apps\\.(.*)").matcher(mimeType);
         if (m.matches()) {
@@ -431,11 +458,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 break;
             }
         }
+
         try (final InputStream in = client.getFileInputStream(id)) {
-            final TikaExtractor extractor = ComponentUtil.getComponent(extractorName);
+            Extractor extractor = ComponentUtil.getExtractorFactory().getExtractor(mimeType);
+            if (extractor == null) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("use a defautl extractor as {} by {}", extractorName, mimeType);
+                }
+                extractor = ComponentUtil.getComponent(extractorName);
+            }
             return extractor.getText(in, null).getContent();
         } catch (final Exception e) {
-            throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents: " + file.getName(), e);
+            if (ignoreError) {
+                logger.warn("Failed to get contents: " + file.getName(), e);
+                return StringUtil.EMPTY;
+            } else {
+                throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents: " + file.getName(), e);
+            }
         }
     }
 
