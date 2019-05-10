@@ -228,40 +228,40 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         if (logger.isDebugEnabled()) {
             logger.debug("file: {}", file);
         }
-        final String mimetype = file.getMimeType();
-        if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Ignore item: {}", file.getWebContentLink());
-            }
-            return;
-        }
-
-        final String[] supportedMimeTypes = (String[]) configMap.get(SUPPORTED_MIMETYPES);
-        if (!Stream.of(supportedMimeTypes).anyMatch(mimetype::matches)) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("{} is not an indexing target.", mimetype);
-            }
-            return;
-        }
-
-        final String url = getUrl(configMap, paramMap, file);
-        final UrlFilter urlFilter = (UrlFilter) configMap.get(URL_FILTER);
-        if (urlFilter != null && !urlFilter.match(url)) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Not matched: {}", url);
-            }
-            return;
-        }
-
-        logger.info("Crawling URL: {}", url);
-
-        final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR)).booleanValue();
-
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
-        final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
-        final Map<String, Object> fileMap = new HashMap<>();
-
         try {
+            final String mimetype = file.getMimeType();
+            if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Ignore item: {}", file.getWebContentLink());
+                }
+                return;
+            }
+
+            final String[] supportedMimeTypes = (String[]) configMap.get(SUPPORTED_MIMETYPES);
+            if (!Stream.of(supportedMimeTypes).anyMatch(mimetype::matches)) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("{} is not an indexing target.", mimetype);
+                }
+                return;
+            }
+
+            final String url = getUrl(configMap, paramMap, file);
+            final UrlFilter urlFilter = (UrlFilter) configMap.get(URL_FILTER);
+            if (urlFilter != null && !urlFilter.match(url)) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Not matched: {}", url);
+                }
+                return;
+            }
+
+            logger.info("Crawling URL: {}", url);
+
+            final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR)).booleanValue();
+
+            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
+            final Map<String, Object> fileMap = new HashMap<>();
+
             if (file.getSize().longValue() > ((Long) configMap.get(MAX_SIZE)).longValue()) {
                 throw new MaxLengthExceededException(
                         "The content length (" + file.getSize() + " byte) is over " + configMap.get(MAX_SIZE) + " byte. The url is " + url);
@@ -363,11 +363,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             }
 
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
-            failureUrlService.store(dataConfig, errorName, url, target);
+            failureUrlService.store(dataConfig, errorName, file.getWebContentLink(), target);
         } catch (final Throwable t) {
             logger.warn("Crawling Access Exception at : " + dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
-            failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), url, t);
+            failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), file.getWebContentLink(), t);
         }
     }
 
