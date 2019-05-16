@@ -262,18 +262,28 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
             final Map<String, Object> fileMap = new HashMap<>();
 
-            if (file.getSize().longValue() > ((Long) configMap.get(MAX_SIZE)).longValue()) {
+            final String content = getFileContents(client, file, ignoreError);
+            final long size;
+            if (file.getSize() != null) {
+                size = file.getSize().longValue();
+            } else if (content != null) {
+                size = content.length();
+            } else {
+                size = 0;
+            }
+
+            if (size > ((Long) configMap.get(MAX_SIZE)).longValue()) {
                 throw new MaxLengthExceededException(
-                        "The content length (" + file.getSize() + " byte) is over " + configMap.get(MAX_SIZE) + " byte. The url is " + url);
+                        "The content length (" + size + " byte) is over " + configMap.get(MAX_SIZE) + " byte. The url is " + url);
             }
 
             final String filetype = ComponentUtil.getFileTypeHelper().get(mimetype);
             fileMap.put(FILE_NAME, file.getName());
             fileMap.put(FILE_DESCRIPTION, file.getDescription() != null ? file.getDescription() : "");
-            fileMap.put(FILE_CONTENTS, getFileContents(client, file, ignoreError));
+            fileMap.put(FILE_CONTENTS, content);
             fileMap.put(FILE_MIMETYPE, mimetype);
             fileMap.put(FILE_FILETYPE, filetype);
-            fileMap.put(FILE_SIZE, file.getSize());
+            fileMap.put(FILE_SIZE, size);
             fileMap.put(FILE_WEB_VIEW_LINK, file.getWebViewLink());
             fileMap.put(FILE_WEB_CONTENT_LINK, file.getWebContentLink());
             fileMap.put(FILE_URL, url);
@@ -407,7 +417,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     protected String getPermission(final String type, final String value) {
-        if ("user".equals(type)) {
+        if (value == null) {
+            return null;
+        } else if ("user".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByUser(value);
         } else if ("group".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
