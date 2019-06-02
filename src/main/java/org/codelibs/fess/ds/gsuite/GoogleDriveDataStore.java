@@ -23,7 +23,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -197,6 +198,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 .get(stream -> stream.map(String::trim).toArray(n -> new String[n]));
     }
 
+    protected ExecutorService newFixedThreadPool(final int nThreads) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Executor Thread Pool: " + nThreads);
+        }
+        return new ThreadPoolExecutor(nThreads, nThreads, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nThreads),
+                new ThreadPoolExecutor.CallerRunsPolicy());
+    }
+
     protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
@@ -204,21 +213,24 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String corpora = paramMap.get("corpora");
         final String spaces = paramMap.get("spaces");
         final String fields = paramMap.getOrDefault("fields", FILE_FIELDS);
-        final ExecutorService executorService =
-                Executors.newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));
+        final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));
         try {
             client.getFiles(query, corpora, spaces, fields, file -> {
                 executorService
                         .execute(() -> processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file));
 
             });
+            if (logger.isDebugEnabled()) {
+                logger.debug("Shutting down thread executor.");
+            }
+            executorService.shutdown();
             executorService.awaitTermination(60, TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
             if (logger.isDebugEnabled()) {
                 logger.debug("Interrupted.", e);
             }
         } finally {
-            executorService.shutdown();
+            executorService.shutdownNow();
         }
     }
 
