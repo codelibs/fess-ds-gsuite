@@ -444,7 +444,16 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     protected String getUrl(final Map<String, Object> configMap, final Map<String, String> paramMap, final File file) {
-        return file.getWebContentLink();
+        final String url = file.getWebContentLink();
+        if (StringUtil.isBlank(url)) {
+            final String id = file.getId();
+            if (StringUtil.isNotBlank(id)) {
+                return "https://drive.google.com/uc?id=" + id + "&export=download";
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("id is null.");
+            }
+        }
+        return url;
     }
 
     protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
