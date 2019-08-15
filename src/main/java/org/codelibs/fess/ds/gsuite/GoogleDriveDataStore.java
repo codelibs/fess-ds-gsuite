@@ -133,7 +133,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     @Override
     protected String getName() {
-        return "GoogleDrive";
+        return this.getClass().getSimpleName();
     }
 
     @Override
