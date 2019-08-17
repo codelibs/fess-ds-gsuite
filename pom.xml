@@ -35,7 +35,7 @@
 	<properties>
 		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
-		<fess.version>13.3.0-SNAPSHOT</fess.version>
+		<fess.version>13.3.0</fess.version>
 
 		<google.apis.version>v3-rev157-1.25.0</google.apis.version>
 		<java.jwt.version>3.4.0</java.jwt.version>
@@ -64,14 +64,14 @@
 		<utflute.version>0.9.1</utflute.version>
 
 		<!-- Crawler -->
-		<crawler.version>3.3.0-SNAPSHOT</crawler.version>
+		<crawler.version>3.3.0</crawler.version>
 
 		<!-- Suggest -->
-		<suggest.version>7.3.0-SNAPSHOT</suggest.version>
+		<suggest.version>7.3.0</suggest.version>
 
 		<!-- Elasticsearch -->
 		<elasticsearch.version>7.3.0</elasticsearch.version>
-		<elasticsearch.httpclient.version>7.3.0-SNAPSHOT</elasticsearch.httpclient.version>
+		<elasticsearch.httpclient.version>7.3.0</elasticsearch.httpclient.version>
 		<cluster.runner.version>${elasticsearch.version}.0</cluster.runner.version>
 
 		<!-- Tomcat -->
