@@ -155,6 +155,10 @@ public class GSuiteClient implements AutoCloseable {
                 if (StringUtil.isNotBlank(corpora)) {
                     list.setCorpora(corpora);
                 }
+                if (corpora == "allDrives") {
+                    list.setIncludeTeamDriveItems(true);
+                    list.setSupportsTeamDrives(true);
+                }
                 if (StringUtil.isNotBlank(spaces)) {
                     list.setSpaces(spaces);
                 }
