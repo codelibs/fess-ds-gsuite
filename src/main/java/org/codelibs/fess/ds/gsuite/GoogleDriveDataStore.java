@@ -130,7 +130,6 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     // other
     protected static final String FILE_FIELDS = "*";
-    protected static final String FILE_CORPORA = "allDrives";
 
     @Override
     protected String getName() {
@@ -211,7 +210,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
         final String query = paramMap.get("query");
-        final String corpora = paramMap.getOrDefault("corpora", FILE_CORPORA);
+        final String corpora = paramMap.getOrDefault("corpora", GSuiteClient.ALL_DRIVES);
         final String spaces = paramMap.get("spaces");
         final String fields = paramMap.getOrDefault("fields", FILE_FIELDS);
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));

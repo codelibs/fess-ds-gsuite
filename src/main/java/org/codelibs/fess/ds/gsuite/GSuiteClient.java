@@ -79,6 +79,8 @@ public class GSuiteClient implements AutoCloseable {
     protected static final String REFRESH_TOKEN_INTERVAL = "refresh_token_interval";
     protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
 
+    public static final String ALL_DRIVES = "allDrives";
+
     protected Drive drive;
     protected NetHttpTransport httpTransport;
     protected Map<String, String> params;
@@ -155,7 +157,7 @@ public class GSuiteClient implements AutoCloseable {
                 if (StringUtil.isNotBlank(corpora)) {
                     list.setCorpora(corpora);
                 }
-                if (corpora == "allDrives") {
+                if (ALL_DRIVES.equals(corpora)) {
                     list.setIncludeTeamDriveItems(true);
                     list.setSupportsTeamDrives(true);
                 }
