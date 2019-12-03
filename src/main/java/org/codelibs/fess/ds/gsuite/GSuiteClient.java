@@ -74,6 +74,8 @@ public class GSuiteClient implements AutoCloseable {
     protected static final String PRIVATE_KEY_PARAM = "private_key";
     protected static final String PRIVATE_KEY_ID_PARAM = "private_key_id";
     protected static final String CLIENT_EMAIL_PARAM = "client_email";
+    protected static final String READ_TIMEOUT = "read_timeout";
+    protected static final String CONNECT_TIMEOUT = "connect_timeout";
     protected static final String PROXY_PORT = "proxy_port";
     protected static final String PROXY_HOST = "proxy_host";
     protected static final String REFRESH_TOKEN_INTERVAL = "refresh_token_interval";
@@ -248,6 +250,8 @@ public class GSuiteClient implements AutoCloseable {
         protected String privateKeyId;
         protected String clientEmail;
         protected String accessToken;
+        protected int readTimeout = 20 * 1000;
+        protected int connectTimeout = 20 * 1000;
 
         protected RequestInitializer(final Map<String, String> params, final NetHttpTransport httpTransport) {
             this.httpTransport = httpTransport;
@@ -261,7 +265,14 @@ public class GSuiteClient implements AutoCloseable {
                         PRIVATE_KEY_ID_PARAM + "', '" + //
                         CLIENT_EMAIL_PARAM + "' is required");
             }
-
+            final String readTimeoutStr = params.get(READ_TIMEOUT);
+            if (StringUtil.isNotBlank(readTimeoutStr)) {
+                readTimeout = Integer.parseInt(readTimeoutStr);
+            }
+            final String connectTimeoutStr = params.get(CONNECT_TIMEOUT);
+            if (StringUtil.isNotBlank(connectTimeoutStr)) {
+                connectTimeout = Integer.parseInt(connectTimeoutStr);
+            }
             refreshToken();
         }
 
@@ -331,6 +342,8 @@ public class GSuiteClient implements AutoCloseable {
         @Override
         public void initialize(final HttpRequest request) throws IOException {
             request.getHeaders().setAuthorization("Bearer " + accessToken);
+            request.setReadTimeout(readTimeout);
+            request.setConnectTimeout(connectTimeout);
         }
 
     }
