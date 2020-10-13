@@ -200,7 +200,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     protected ExecutorService newFixedThreadPool(final int nThreads) {
         if (logger.isDebugEnabled()) {
-            logger.debug("Executor Thread Pool: " + nThreads);
+            logger.debug("Executor Thread Pool: {}", nThreads);
         }
         return new ThreadPoolExecutor(nThreads, nThreads, 0L, TimeUnit.MILLISECONDS, new LinkedBlockingQueue<Runnable>(nThreads),
                 new ThreadPoolExecutor.CallerRunsPolicy());
