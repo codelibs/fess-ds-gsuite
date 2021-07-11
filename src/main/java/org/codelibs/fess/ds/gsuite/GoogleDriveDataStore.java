@@ -43,6 +43,7 @@ import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
+import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.PermissionHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.slf4j.Logger;
@@ -160,11 +161,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     protected boolean isIgnoreFolder(final Map<String, String> paramMap) {
-        return paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE).equalsIgnoreCase(Constants.TRUE);
+        return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE));
     }
 
     protected boolean isIgnoreError(final Map<String, String> paramMap) {
-        return paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE).equalsIgnoreCase(Constants.TRUE);
+        return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE));
     }
 
     protected long getMaxSize(final Map<String, String> paramMap) {
@@ -226,9 +227,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             executorService.shutdown();
             executorService.awaitTermination(60, TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
-            if (logger.isDebugEnabled()) {
-                logger.debug("Interrupted.", e);
-            }
+            throw new DataStoreException("Interrupted.", e);
         } finally {
             executorService.shutdownNow();
         }
@@ -269,7 +268,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             logger.info("Crawling URL: {}", url);
 
-            final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR)).booleanValue();
+            final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
 
             final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
             final Map<String, Object> fileMap = new HashMap<>();
@@ -277,7 +276,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final String content = getFileContents(client, file, ignoreError);
             final long size;
             if (file.getSize() != null) {
-                size = file.getSize().longValue();
+                size = file.getSize();
             } else if (content != null) {
                 size = content.length();
             } else {
@@ -442,11 +441,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected String getPermission(final String type, final String value) {
         if (value == null) {
             return null;
-        } else if ("user".equals(type)) {
+        }
+        if ("user".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByUser(value);
-        } else if ("group".equals(type)) {
-            return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
-        } else if ("domain".equals(type)) {
+        } else if ("group".equals(type) || "domain".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
         } else if ("anyone".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByUser("guest");
@@ -460,7 +458,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final String id = file.getId();
             if (StringUtil.isNotBlank(id)) {
                 return "https://drive.google.com/uc?id=" + id + "&export=download";
-            } else if (logger.isDebugEnabled()) {
+            }
+            if (logger.isDebugEnabled()) {
                 logger.debug("id is null.");
             }
         }
@@ -516,9 +515,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             if (ignoreError) {
                 logger.warn("Failed to get contents: " + file.getName(), e);
                 return StringUtil.EMPTY;
-            } else {
-                throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents: " + file.getName(), e);
             }
+            throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents: " + file.getName(), e);
         }
     }
 

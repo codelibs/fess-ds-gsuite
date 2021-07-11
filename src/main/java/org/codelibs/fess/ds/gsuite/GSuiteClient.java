@@ -201,9 +201,8 @@ public class GSuiteClient implements AutoCloseable {
 
             if (dfos.isInMemory()) {
                 return new ByteArrayInputStream(dfos.getData());
-            } else {
-                return new TemporaryFileInputStream(dfos.getFile());
             }
+            return new TemporaryFileInputStream(dfos.getFile());
         } catch (final Exception e) {
             throw new CrawlingAccessException("Failed to create an input stream from " + id, e);
         }
