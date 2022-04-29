@@ -245,6 +245,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             logger.debug("file: {}", file);
         }
         final StatsKeyObject statsKey = new StatsKeyObject(file.getId());
+        paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
             crawlerStatsHelper.begin(statsKey);
@@ -539,7 +540,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             return extractor.getText(in, null).getContent();
         } catch (final Exception e) {
             if (ignoreError) {
-                logger.warn("Failed to get contents: " + file.getName(), e);
+                logger.warn("Failed to get contents: {}", file.getName(), e);
                 return StringUtil.EMPTY;
             }
             throw new DataStoreCrawlingException(file.getWebContentLink(), "Failed to get contents: " + file.getName(), e);
