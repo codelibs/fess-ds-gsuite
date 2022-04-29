@@ -41,9 +41,13 @@ import org.codelibs.fess.crawler.extractor.Extractor;
 import org.codelibs.fess.crawler.filter.UrlFilter;
 import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
+import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.es.config.exentity.DataConfig;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
 import org.codelibs.fess.exception.DataStoreException;
+import org.codelibs.fess.helper.CrawlerStatsHelper;
+import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
+import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.helper.PermissionHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.slf4j.Logger;
@@ -138,7 +142,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     @Override
-    protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, String> paramMap,
+    protected void storeData(final DataConfig dataConfig, final IndexUpdateCallback callback, final DataStoreParams paramMap,
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
 
         final Map<String, Object> configMap = new HashMap<>();
@@ -156,20 +160,20 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
-    protected GSuiteClient createClient(final Map<String, String> paramMap) {
+    protected GSuiteClient createClient(final DataStoreParams paramMap) {
         return new GSuiteClient(paramMap);
     }
 
-    protected boolean isIgnoreFolder(final Map<String, String> paramMap) {
-        return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_FOLDER, Constants.TRUE));
+    protected boolean isIgnoreFolder(final DataStoreParams paramMap) {
+        return Constants.TRUE.equalsIgnoreCase(paramMap.getAsString(IGNORE_FOLDER, Constants.TRUE));
     }
 
-    protected boolean isIgnoreError(final Map<String, String> paramMap) {
-        return Constants.TRUE.equalsIgnoreCase(paramMap.getOrDefault(IGNORE_ERROR, Constants.TRUE));
+    protected boolean isIgnoreError(final DataStoreParams paramMap) {
+        return Constants.TRUE.equalsIgnoreCase(paramMap.getAsString(IGNORE_ERROR, Constants.TRUE));
     }
 
-    protected long getMaxSize(final Map<String, String> paramMap) {
-        final String value = paramMap.get(MAX_SIZE);
+    protected long getMaxSize(final DataStoreParams paramMap) {
+        final String value = paramMap.getAsString(MAX_SIZE);
         try {
             return StringUtil.isNotBlank(value) ? Long.parseLong(value) : DEFAULT_MAX_SIZE;
         } catch (final NumberFormatException e) {
@@ -177,25 +181,25 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
-    protected UrlFilter getUrlFilter(final Map<String, String> paramMap) {
+    protected UrlFilter getUrlFilter(final DataStoreParams paramMap) {
         final UrlFilter urlFilter = ComponentUtil.getComponent(UrlFilter.class);
-        final String include = paramMap.get(INCLUDE_PATTERN);
+        final String include = paramMap.getAsString(INCLUDE_PATTERN);
         if (StringUtil.isNotBlank(include)) {
             urlFilter.addInclude(include);
         }
-        final String exclude = paramMap.get(EXCLUDE_PATTERN);
+        final String exclude = paramMap.getAsString(EXCLUDE_PATTERN);
         if (StringUtil.isNotBlank(exclude)) {
             urlFilter.addExclude(exclude);
         }
-        urlFilter.init(paramMap.get(Constants.CRAWLING_INFO_ID));
+        urlFilter.init(paramMap.getAsString(Constants.CRAWLING_INFO_ID));
         if (logger.isDebugEnabled()) {
             logger.debug("urlFilter: {}", urlFilter);
         }
         return urlFilter;
     }
 
-    protected String[] getSupportedMimeTypes(final Map<String, String> paramMap) {
-        return StreamUtil.split(paramMap.getOrDefault(SUPPORTED_MIMETYPES, ".*"), ",")
+    protected String[] getSupportedMimeTypes(final DataStoreParams paramMap) {
+        return StreamUtil.split(paramMap.getAsString(SUPPORTED_MIMETYPES, ".*"), ",")
                 .get(stream -> stream.map(String::trim).toArray(n -> new String[n]));
     }
 
@@ -208,13 +212,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
-            final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
-        final String query = paramMap.get("query");
-        final String corpora = paramMap.getOrDefault("corpora", GSuiteClient.ALL_DRIVES);
-        final String spaces = paramMap.get("spaces");
-        final String fields = paramMap.getOrDefault("fields", FILE_FIELDS);
-        final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getOrDefault(NUMBER_OF_THREADS, "1")));
+        final String query = paramMap.getAsString("query");
+        final String corpora = paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES);
+        final String spaces = paramMap.getAsString("spaces");
+        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
         try {
             client.getFiles(query, corpora, spaces, fields, file -> {
                 executorService
@@ -234,18 +238,22 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
-            final Map<String, String> paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final File file) {
+        final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         if (logger.isDebugEnabled()) {
             logger.debug("file: {}", file);
         }
+        final StatsKeyObject statsKey = new StatsKeyObject(file.getId());
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
+            crawlerStatsHelper.begin(statsKey);
             final String mimetype = file.getMimeType();
             if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
                 if (logger.isDebugEnabled()) {
                     logger.debug("Ignore item: {}", file.getWebContentLink());
                 }
+                crawlerStatsHelper.discard(statsKey);
                 return;
             }
 
@@ -254,6 +262,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 if (logger.isDebugEnabled()) {
                     logger.debug("{} is not an indexing target.", mimetype);
                 }
+                crawlerStatsHelper.discard(statsKey);
                 return;
             }
 
@@ -263,6 +272,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 if (logger.isDebugEnabled()) {
                     logger.debug("Not matched: {}", url);
                 }
+                crawlerStatsHelper.discard(statsKey);
                 return;
             }
 
@@ -270,7 +280,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
 
-            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap);
+            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
             final Map<String, Object> fileMap = new HashMap<>();
 
             final String content = getFileContents(client, file, ignoreError);
@@ -343,12 +353,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             final List<String> permissions = getFilePermissions(client, file);
             final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
-            StreamUtil.split(paramMap.get(DEFAULT_PERMISSIONS), ",")
+            StreamUtil.split(paramMap.getAsString(DEFAULT_PERMISSIONS), ",")
                     .of(stream -> stream.filter(StringUtil::isNotBlank).map(permissionHelper::encode).forEach(permissions::add));
             fileMap.put(FILE_ROLES, permissions);
 
-            resultMap.put("files", fileMap); // TODO deprecated
             resultMap.put(FILE, fileMap);
+
+            crawlerStatsHelper.record(statsKey, StatsAction.PREPARED);
+
             if (logger.isDebugEnabled()) {
                 logger.debug("fileMap: {}", fileMap);
             }
@@ -360,17 +372,25 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                     dataMap.put(entry.getKey(), convertValue);
                 }
             }
+
+            crawlerStatsHelper.record(statsKey, StatsAction.EVALUATED);
+
             if (logger.isDebugEnabled()) {
                 logger.debug("dataMap: {}", dataMap);
             }
 
+            if (dataMap.get("url") instanceof String statsUrl) {
+                statsKey.setUrl(statsUrl);
+            }
+
             callback.store(paramMap, dataMap);
+            crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
         } catch (final CrawlingAccessException e) {
-            logger.warn("Crawling Access Exception at : " + dataMap, e);
+            logger.warn("Crawling Access Exception at : {}", dataMap, e);
 
             Throwable target = e;
-            if (target instanceof MultipleCrawlingAccessException) {
-                final Throwable[] causes = ((MultipleCrawlingAccessException) target).getCauses();
+            if (target instanceof MultipleCrawlingAccessException ex) {
+                final Throwable[] causes = ex.getCauses();
                 if (causes.length > 0) {
                     target = causes[causes.length - 1];
                 }
@@ -391,15 +411,19 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, errorName, url, target);
+            crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
             String url = getUrl(configMap, paramMap, file);
             if (url == null) {
                 url = StringUtil.EMPTY;
             }
 
-            logger.warn("Crawling Access Exception at : " + dataMap, t);
+            logger.warn("Crawling Access Exception at : {}", dataMap, t);
             final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
             failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), url, t);
+            crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
+        } finally {
+            crawlerStatsHelper.done(statsKey);
         }
     }
 
@@ -447,13 +471,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
         if ("group".equals(type) || "domain".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
-        } else if ("anyone".equals(type)) {
+        }
+        if ("anyone".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByUser("guest");
         }
         return null;
     }
 
-    protected String getUrl(final Map<String, Object> configMap, final Map<String, String> paramMap, final File file) {
+    protected String getUrl(final Map<String, Object> configMap, final DataStoreParams paramMap, final File file) {
         final String url = file.getWebContentLink();
         if (StringUtil.isBlank(url)) {
             final String id = file.getId();

@@ -29,7 +29,6 @@ import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.Base64;
 import java.util.Date;
-import java.util.Map;
 import java.util.function.Consumer;
 
 import org.apache.commons.io.output.DeferredFileOutputStream;
@@ -41,6 +40,7 @@ import org.codelibs.core.timer.TimeoutTask;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
+import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -85,7 +85,7 @@ public class GSuiteClient implements AutoCloseable {
 
     protected Drive drive;
     protected NetHttpTransport httpTransport;
-    protected Map<String, String> params;
+    protected DataStoreParams params;
 
     protected int maxCachedContentSize = 1024 * 1024;
 
@@ -95,16 +95,16 @@ public class GSuiteClient implements AutoCloseable {
 
     protected String applicationName = "Fess DataStore";
 
-    public GSuiteClient(final Map<String, String> params) {
+    public GSuiteClient(final DataStoreParams params) {
         this.params = params;
         this.httpTransport = newHttpTransport();
-        final String size = params.get(MAX_CACHED_CONTENT_SIZE);
+        final String size = params.getAsString(MAX_CACHED_CONTENT_SIZE);
         if (StringUtil.isNotBlank(size)) {
             maxCachedContentSize = Integer.parseInt(size);
         }
         requestInitializer = new RequestInitializer(params, httpTransport);
         refreshTokenTask = TimeoutManager.getInstance().addTimeoutTarget(requestInitializer,
-                Integer.parseInt(params.getOrDefault(REFRESH_TOKEN_INTERVAL, "3540")), true);
+                Integer.parseInt(params.getAsString(REFRESH_TOKEN_INTERVAL, "3540")), true);
     }
 
     @Override
@@ -117,8 +117,8 @@ public class GSuiteClient implements AutoCloseable {
     protected NetHttpTransport newHttpTransport() {
         try {
             final Builder builder = new NetHttpTransport.Builder().trustCertificates(GoogleUtils.getCertificateTrustStore());
-            final String proxyHost = params.get(PROXY_HOST);
-            final String proxyPort = params.get(PROXY_PORT);
+            final String proxyHost = params.getAsString(PROXY_HOST);
+            final String proxyPort = params.getAsString(PROXY_PORT);
             if (StringUtil.isNotBlank(proxyHost) && StringUtil.isNotBlank(proxyPort)) {
                 builder.setProxy(new Proxy(Proxy.Type.HTTP, new InetSocketAddress(proxyHost, Integer.parseInt(proxyPort))));
             }
@@ -252,23 +252,23 @@ public class GSuiteClient implements AutoCloseable {
         protected int readTimeout = 20 * 1000;
         protected int connectTimeout = 20 * 1000;
 
-        protected RequestInitializer(final Map<String, String> params, final NetHttpTransport httpTransport) {
+        protected RequestInitializer(final DataStoreParams params, final NetHttpTransport httpTransport) {
             this.httpTransport = httpTransport;
 
-            privateKeyPem = params.getOrDefault(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
-            privateKeyId = params.getOrDefault(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
-            clientEmail = params.getOrDefault(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
+            privateKeyPem = params.getAsString(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
+            privateKeyId = params.getAsString(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
+            clientEmail = params.getAsString(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
             if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
                 throw new DataStoreException("parameter '" + //
                         PRIVATE_KEY_PARAM + "', '" + //
                         PRIVATE_KEY_ID_PARAM + "', '" + //
                         CLIENT_EMAIL_PARAM + "' is required");
             }
-            final String readTimeoutStr = params.get(READ_TIMEOUT);
+            final String readTimeoutStr = params.getAsString(READ_TIMEOUT);
             if (StringUtil.isNotBlank(readTimeoutStr)) {
                 readTimeout = Integer.parseInt(readTimeoutStr);
             }
-            final String connectTimeoutStr = params.get(CONNECT_TIMEOUT);
+            final String connectTimeoutStr = params.getAsString(CONNECT_TIMEOUT);
             if (StringUtil.isNotBlank(connectTimeoutStr)) {
                 connectTimeout = Integer.parseInt(connectTimeoutStr);
             }
