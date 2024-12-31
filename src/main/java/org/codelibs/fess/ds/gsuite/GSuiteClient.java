@@ -33,6 +33,8 @@ import java.util.function.Consumer;
 
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.core.timer.TimeoutManager;
 import org.codelibs.core.timer.TimeoutTarget;
@@ -42,8 +44,6 @@ import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import com.auth0.jwt.JWT;
 import com.auth0.jwt.algorithms.Algorithm;
@@ -69,7 +69,7 @@ import com.google.api.services.drive.model.FileList;
 
 public class GSuiteClient implements AutoCloseable {
 
-    private static final Logger logger = LoggerFactory.getLogger(GSuiteClient.class);
+    private static final Logger logger = LogManager.getLogger(GSuiteClient.class);
 
     protected static final String PRIVATE_KEY_PARAM = "private_key";
     protected static final String PRIVATE_KEY_ID_PARAM = "private_key_id";
