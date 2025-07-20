@@ -67,34 +67,58 @@ import com.google.api.services.drive.Drive.Files.List;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
 
+/**
+ * A client for accessing Google Suite APIs.
+ */
 public class GSuiteClient implements AutoCloseable {
 
     private static final Logger logger = LogManager.getLogger(GSuiteClient.class);
 
+    /** Parameter key for the private key. */
     protected static final String PRIVATE_KEY_PARAM = "private_key";
+    /** Parameter key for the private key ID. */
     protected static final String PRIVATE_KEY_ID_PARAM = "private_key_id";
+    /** Parameter key for the client email. */
     protected static final String CLIENT_EMAIL_PARAM = "client_email";
+    /** Parameter key for the read timeout. */
     protected static final String READ_TIMEOUT = "read_timeout";
+    /** Parameter key for the connect timeout. */
     protected static final String CONNECT_TIMEOUT = "connect_timeout";
+    /** Parameter key for the proxy port. */
     protected static final String PROXY_PORT = "proxy_port";
+    /** Parameter key for the proxy host. */
     protected static final String PROXY_HOST = "proxy_host";
+    /** Parameter key for the refresh token interval. */
     protected static final String REFRESH_TOKEN_INTERVAL = "refresh_token_interval";
+    /** Parameter key for the maximum cached content size. */
     protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
 
+    /** Constant for all drives. */
     public static final String ALL_DRIVES = "allDrives";
 
+    /** The Google Drive client. */
     protected Drive drive;
+    /** The HTTP transport. */
     protected NetHttpTransport httpTransport;
+    /** The data store parameters. */
     protected DataStoreParams params;
 
+    /** The maximum size of content to be cached in memory. */
     protected int maxCachedContentSize = 1024 * 1024;
 
+    /** The request initializer. */
     protected RequestInitializer requestInitializer;
 
+    /** The task for refreshing the access token. */
     protected TimeoutTask refreshTokenTask;
 
+    /** The name of the application. */
     protected String applicationName = "Fess DataStore";
 
+    /**
+     * Constructs a new GSuiteClient.
+     * @param params The data store parameters.
+     */
     public GSuiteClient(final DataStoreParams params) {
         this.params = params;
         this.httpTransport = newHttpTransport();
@@ -114,6 +138,10 @@ public class GSuiteClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Creates a new NetHttpTransport.
+     * @return A new NetHttpTransport.
+     */
     protected NetHttpTransport newHttpTransport() {
         try {
             final Builder builder = new NetHttpTransport.Builder().trustCertificates(GoogleUtils.getCertificateTrustStore());
@@ -128,12 +156,20 @@ public class GSuiteClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Creates a new Drive client.
+     * @return A new Drive client.
+     */
     protected Drive createGlobalDrive() {
         return new Drive.Builder(httpTransport, new JacksonFactory(), requestInitializer)//
                 .setApplicationName(applicationName) //
                 .build();
     }
 
+    /**
+     * Returns the Drive client.
+     * @return The Drive client.
+     */
     protected Drive getDrive() {
         if (drive == null) {
             drive = createGlobalDrive();
@@ -141,6 +177,14 @@ public class GSuiteClient implements AutoCloseable {
         return drive;
     }
 
+    /**
+     * Retrieves files from Google Drive.
+     * @param q The query to search for files.
+     * @param corpora The corpora to search in.
+     * @param spaces The spaces to search in.
+     * @param fields The fields to retrieve for each file.
+     * @param consumer A consumer for each file.
+     */
     public void getFiles(final String q, final String corpora, final String spaces, final String fields, final Consumer<File> consumer) {
         if (logger.isDebugEnabled()) {
             logger.debug("query: {}, corpora: {}, spaces: {}, fields: {}", q, corpora, spaces, fields);
@@ -184,6 +228,12 @@ public class GSuiteClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Extracts the text from a file.
+     * @param id The ID of the file.
+     * @param mimeType The mime type of the file.
+     * @return The text of the file.
+     */
     public String extractFileText(final String id, final String mimeType) {
         try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             getDrive().files().export(id, mimeType).executeMediaAndDownloadTo(out);
@@ -193,6 +243,11 @@ public class GSuiteClient implements AutoCloseable {
         }
     }
 
+    /**
+     * Returns an input stream for a file.
+     * @param id The ID of the file.
+     * @return An input stream for the file.
+     */
     public InputStream getFileInputStream(final String id) {
         try (final DeferredFileOutputStream dfos =
                 new DeferredFileOutputStream(maxCachedContentSize, "crawler-GSuiteClient-", ".out", SystemUtils.getJavaIoTmpDir())) {
@@ -208,8 +263,18 @@ public class GSuiteClient implements AutoCloseable {
         }
     }
 
+    /**
+     * A response from the token endpoint.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     protected static class TokenResponse {
+        /**
+         * Default constructor.
+         */
+        public TokenResponse() {
+            // do nothing
+        }
+
         @JsonProperty("access_token")
         private String accessToken;
         @JsonProperty("expires_in")
@@ -241,17 +306,32 @@ public class GSuiteClient implements AutoCloseable {
         }
     }
 
+    /**
+     * A request initializer for Google Drive API requests.
+     */
     protected static class RequestInitializer implements HttpRequestInitializer, TimeoutTarget {
 
+        /** The HTTP transport. */
         protected NetHttpTransport httpTransport;
 
+        /** The private key in PEM format. */
         protected String privateKeyPem;
+        /** The private key ID. */
         protected String privateKeyId;
+        /** The client email. */
         protected String clientEmail;
+        /** The access token. */
         protected String accessToken;
+        /** The read timeout in milliseconds. */
         protected int readTimeout = 20 * 1000;
+        /** The connect timeout in milliseconds. */
         protected int connectTimeout = 20 * 1000;
 
+        /**
+         * Constructs a new RequestInitializer.
+         * @param params The data store parameters.
+         * @param httpTransport The HTTP transport.
+         */
         protected RequestInitializer(final DataStoreParams params, final NetHttpTransport httpTransport) {
             this.httpTransport = httpTransport;
 
@@ -275,6 +355,9 @@ public class GSuiteClient implements AutoCloseable {
             refreshToken();
         }
 
+        /**
+         * Refreshes the access token.
+         */
         protected void refreshToken() {
             if (httpTransport == null) {
                 return;
@@ -321,6 +404,12 @@ public class GSuiteClient implements AutoCloseable {
             }
         }
 
+        /**
+         * Returns the private key.
+         * @return The private key.
+         * @throws NoSuchAlgorithmException If the algorithm is not available.
+         * @throws InvalidKeySpecException If the key specification is invalid.
+         */
         protected PrivateKey getPrivateKey() throws NoSuchAlgorithmException, InvalidKeySpecException {
             final String replaced = privateKeyPem.replaceAll("\\\\n|\\n|-----[A-Z ]+-----", StringUtil.EMPTY);
             final byte[] bytes = Base64.getDecoder().decode(replaced);
@@ -347,6 +436,10 @@ public class GSuiteClient implements AutoCloseable {
 
     }
 
+    /**
+     * Sets the application name.
+     * @param applicationName The application name.
+     */
     public void setApplicationName(final String applicationName) {
         this.applicationName = applicationName;
     }

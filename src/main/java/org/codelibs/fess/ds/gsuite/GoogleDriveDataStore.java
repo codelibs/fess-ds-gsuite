@@ -58,82 +58,157 @@ import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.Permission;
 import com.google.api.services.drive.model.User;
 
+/**
+ * DataStore for Google Drive.
+ */
 public class GoogleDriveDataStore extends AbstractDataStore {
 
     private static final Logger logger = LogManager.getLogger(GoogleDriveDataStore.class);
 
+    /** Default maximum size of a file to be indexed. */
     protected static final long DEFAULT_MAX_SIZE = 10000000L; // 10m
 
     // parameters
+    /** Parameter key for the maximum file size. */
     protected static final String MAX_SIZE = "max_size";
+    /** Parameter key for ignoring folders. */
     protected static final String IGNORE_FOLDER = "ignore_folder";
+    /** Parameter key for ignoring errors. */
     protected static final String IGNORE_ERROR = "ignore_error";
+    /** Parameter key for supported mime types. */
     protected static final String SUPPORTED_MIMETYPES = "supported_mimetypes";
+    /** Parameter key for include patterns. */
     protected static final String INCLUDE_PATTERN = "include_pattern";
+    /** Parameter key for exclude patterns. */
     protected static final String EXCLUDE_PATTERN = "exclude_pattern";
+    /** Parameter key for the URL filter. */
     protected static final String URL_FILTER = "url_filter";
+    /** Parameter key for default permissions. */
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
+    /** Parameter key for the number of threads. */
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
 
     // scripts
+    /** Script key for the file object. */
     protected static final String FILE = "file";
+    /** Script key for the file name. */
     protected static final String FILE_NAME = "name";
+    /** Script key for the file description. */
     protected static final String FILE_DESCRIPTION = "description";
+    /** Script key for the file contents. */
     protected static final String FILE_CONTENTS = "contents";
+    /** Script key for the file mime type. */
     protected static final String FILE_MIMETYPE = "mimetype";
+    /** Script key for the file type. */
     protected static final String FILE_FILETYPE = "filetype";
+    /** Script key for the file thumbnail link. */
     protected static final String FILE_THUMBNAIL_LINK = "thumbnail_link";
+    /** Script key for the file web view link. */
     protected static final String FILE_WEB_VIEW_LINK = "web_view_link";
+    /** Script key for the file web content link. */
     protected static final String FILE_WEB_CONTENT_LINK = "web_content_link";
+    /** Script key for the file created time. */
     protected static final String FILE_CREATED_TIME = "created_time";
+    /** Script key for the file modified time. */
     protected static final String FILE_MODIFIED_TIME = "modified_time";
+    /** Script key for whether writers can share the file. */
     protected static final String FILE_WRITERS_CAN_SHARE = "writers_can_share";
+    /** Script key for whether viewers can copy content. */
     protected static final String FILE_VIEWERS_CAN_COPY_CONTENT = "viewers_can_copy_content";
+    /** Script key for the time the file was viewed by the user. */
     protected static final String FILE_VIEWED_BY_ME_TIME = "viewed_by_me_time";
+    /** Script key for whether the file was viewed by the user. */
     protected static final String FILE_VIEWED_BY_ME = "viewed_by_me";
+    /** Script key for video media metadata. */
     protected static final String FILE_VIDEO_MEDIA_METADATA = "video_media_metadata";
+    /** Script key for the file version. */
     protected static final String FILE_VERSION = "version";
+    /** Script key for the trashing user. */
     protected static final String FILE_TRASHING_USER = "trashing_user";
+    /** Script key for the trashed time. */
     protected static final String FILE_TRASHED_TIME = "trashed_time";
+    /** Script key for whether the file is trashed. */
     protected static final String FILE_TRASHED = "trashed";
+    /** Script key for the thumbnail version. */
     protected static final String FILE_THUMBNAIL_VERSION = "thumbnail_version";
+    /** Script key for the team drive ID. */
     protected static final String FILE_TEAM_DRIVE_ID = "team_drive_id";
+    /** Script key for whether the file is shared. */
     protected static final String FILE_SHARED = "shared";
+    /** Script key for the quota bytes used. */
     protected static final String FILE_QUOTA_BYTES_USED = "quota_bytes_used";
+    /** Script key for the file parents. */
     protected static final String FILE_PARENTS = "parents";
+    /** Script key for the file owners. */
     protected static final String FILE_OWNERS = "owners";
+    /** Script key for whether the file is owned by the user. */
     protected static final String FILE_OWNED_BY_ME = "owned_by_me";
+    /** Script key for the original file name. */
     protected static final String FILE_ORIGINAL_FILENAME = "original_filename";
+    /** Script key for the time the file was modified by the user. */
     protected static final String FILE_MODIFIED_BY_ME_TIME = "modified_by_me_time";
+    /** Script key for whether the file was modified by the user. */
     protected static final String FILE_MODIFIED_BY_ME = "modified_by_me";
+    /** Script key for the MD5 checksum. */
     protected static final String FILE_MD5_CHECKSUM = "md5_checksum";
-    protected static final String FILE_LAST_MODIFIYING_USER = "last_modifiying_user";
+    /** Script key for the last modifying user. */
+    protected static final String FILE_LAST_MODIFYING_USER = "last_modifying_user";
+    /** Script key for the file kind. */
     protected static final String FILE_KIND = "kind";
+    /** Script key for whether the app is authorized. */
     protected static final String FILE_IS_APP_AUTHORIZED = "is_app_authorized";
+    /** Script key for image media metadata. */
     protected static final String FILE_IMAGE_MEDIA_METADATA = "image_media_metadata";
+    /** Script key for the file ID. */
     protected static final String FILE_ID = "id";
+    /** Script key for the file icon link. */
     protected static final String FILE_ICON_LINK = "icon_link";
+    /** Script key for the head revision ID. */
     protected static final String FILE_HEAD_REVISION_ID = "head_revision_id";
+    /** Script key for whether the file has a thumbnail. */
     protected static final String FILE_HAS_THUMBNAIL = "has_thumbnail";
-    protected static final String FILE_HAS_ARGUMENTED_PERMISSIONS = "has_argumented_permissions";
+    /** Script key for whether the file has augmented permissions. */
+    protected static final String FILE_HAS_AUGMENTED_PERMISSIONS = "has_augmented_permissions";
+    /** Script key for the full file extension. */
     protected static final String FILE_FULL_FILE_EXTENSION = "full_file_extension";
-    protected static final String FILE_FOLDER_COLOR_RBG = "folder_color_rbg";
+    /** Script key for the folder color RGB. */
+    protected static final String FILE_FOLDER_COLOR_RGB = "folder_color_rgb";
+    /** Script key for the file extension. */
     protected static final String FILE_FILE_EXTENSION = "file_extension";
+    /** Script key for the export links. */
     protected static final String FILE_EXPORT_LINKS = "export_links";
+    /** Script key for whether the file is explicitly trashed. */
     protected static final String FILE_EXPLICITLY_TRASHED = "explicitly_trashed";
+    /** Script key for whether copying requires writer permission. */
     protected static final String FILE_COPY_REQUIRES_WRITER_PERMISSION = "copy_requires_writer_permission";
+    /** Script key for the app properties. */
     protected static final String FILE_APP_PROPERTIES = "app_properties";
+    /** Script key for the file capabilities. */
     protected static final String FILE_CAPABILITIES = "capabilities";
+    /** Script key for the content hints. */
     protected static final String FILE_CONTENT_HINTS = "content_hints";
+    /** Script key for the class info. */
     protected static final String FILE_CLASS_INFO = "class_info";
+    /** Script key for the file URL. */
     protected static final String FILE_URL = "url";
+    /** Script key for the file size. */
     protected static final String FILE_SIZE = "size";
+    /** Script key for the file roles. */
     protected static final String FILE_ROLES = "roles";
 
+    /** The name of the extractor to use. */
     protected String extractorName = "tikaExtractor";
 
     // other
+    /** The fields to retrieve for files. */
     protected static final String FILE_FIELDS = "*";
+
+    /**
+     * Default constructor.
+     */
+    public GoogleDriveDataStore() {
+        super();
+    }
 
     @Override
     protected String getName() {
@@ -159,18 +234,38 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Creates a GSuiteClient.
+     * @param paramMap The parameters for the data store.
+     * @return A GSuiteClient.
+     */
     protected GSuiteClient createClient(final DataStoreParams paramMap) {
         return new GSuiteClient(paramMap);
     }
 
+    /**
+     * Returns whether to ignore folders.
+     * @param paramMap The parameters for the data store.
+     * @return true if folders should be ignored, false otherwise.
+     */
     protected boolean isIgnoreFolder(final DataStoreParams paramMap) {
         return Constants.TRUE.equalsIgnoreCase(paramMap.getAsString(IGNORE_FOLDER, Constants.TRUE));
     }
 
+    /**
+     * Returns whether to ignore errors.
+     * @param paramMap The parameters for the data store.
+     * @return true if errors should be ignored, false otherwise.
+     */
     protected boolean isIgnoreError(final DataStoreParams paramMap) {
         return Constants.TRUE.equalsIgnoreCase(paramMap.getAsString(IGNORE_ERROR, Constants.TRUE));
     }
 
+    /**
+     * Returns the maximum size of a file to be indexed.
+     * @param paramMap The parameters for the data store.
+     * @return The maximum size of a file to be indexed.
+     */
     protected long getMaxSize(final DataStoreParams paramMap) {
         final String value = paramMap.getAsString(MAX_SIZE);
         try {
@@ -180,6 +275,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Returns the URL filter.
+     * @param paramMap The parameters for the data store.
+     * @return The URL filter.
+     */
     protected UrlFilter getUrlFilter(final DataStoreParams paramMap) {
         final UrlFilter urlFilter = ComponentUtil.getComponent(UrlFilter.class);
         final String include = paramMap.getAsString(INCLUDE_PATTERN);
@@ -197,11 +297,21 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return urlFilter;
     }
 
+    /**
+     * Returns the supported mime types.
+     * @param paramMap The parameters for the data store.
+     * @return The supported mime types.
+     */
     protected String[] getSupportedMimeTypes(final DataStoreParams paramMap) {
         return StreamUtil.split(paramMap.getAsString(SUPPORTED_MIMETYPES, ".*"), ",")
                 .get(stream -> stream.map(String::trim).toArray(n -> new String[n]));
     }
 
+    /**
+     * Creates a new fixed thread pool.
+     * @param nThreads The number of threads.
+     * @return A new fixed thread pool.
+     */
     protected ExecutorService newFixedThreadPool(final int nThreads) {
         if (logger.isDebugEnabled()) {
             logger.debug("Executor Thread Pool: {}", nThreads);
@@ -210,6 +320,16 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 new ThreadPoolExecutor.CallerRunsPolicy());
     }
 
+    /**
+     * Stores the files.
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the files.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The GSuiteClient.
+     */
     protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
@@ -236,6 +356,17 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Processes a file.
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the file.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The GSuiteClient.
+     * @param file The file to process.
+     */
     protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final File file) {
@@ -316,9 +447,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             fileMap.put(FILE_EXPLICITLY_TRASHED, file.getExplicitlyTrashed());
             fileMap.put(FILE_EXPORT_LINKS, file.getExportLinks());
             fileMap.put(FILE_FILE_EXTENSION, file.getFileExtension());
-            fileMap.put(FILE_FOLDER_COLOR_RBG, file.getFolderColorRgb());
+            fileMap.put(FILE_FOLDER_COLOR_RGB, file.getFolderColorRgb());
             fileMap.put(FILE_FULL_FILE_EXTENSION, file.getFullFileExtension());
-            fileMap.put(FILE_HAS_ARGUMENTED_PERMISSIONS, file.getHasAugmentedPermissions());
+            fileMap.put(FILE_HAS_AUGMENTED_PERMISSIONS, file.getHasAugmentedPermissions());
             fileMap.put(FILE_HAS_THUMBNAIL, file.getHasThumbnail());
             fileMap.put(FILE_HEAD_REVISION_ID, file.getHeadRevisionId());
             fileMap.put(FILE_ICON_LINK, file.getIconLink());
@@ -326,7 +457,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             fileMap.put(FILE_IMAGE_MEDIA_METADATA, file.getImageMediaMetadata());
             fileMap.put(FILE_IS_APP_AUTHORIZED, file.getIsAppAuthorized());
             fileMap.put(FILE_KIND, file.getKind());
-            fileMap.put(FILE_LAST_MODIFIYING_USER, file.getLastModifyingUser());
+            fileMap.put(FILE_LAST_MODIFYING_USER, file.getLastModifyingUser());
             fileMap.put(FILE_MD5_CHECKSUM, file.getMd5Checksum());
             fileMap.put(FILE_MODIFIED_BY_ME, file.getModifiedByMe());
             fileMap.put(FILE_MODIFIED_BY_ME_TIME, toDate(file.getModifiedByMeTime()));
@@ -427,6 +558,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Converts a DateTime to a Date.
+     * @param date The DateTime to convert.
+     * @return The converted Date.
+     */
     protected Date toDate(final com.google.api.client.util.DateTime date) {
         if (date == null) {
             return null;
@@ -434,6 +570,12 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return new Date(date.getValue());
     }
 
+    /**
+     * Returns the permissions for a file.
+     * @param client The GSuiteClient.
+     * @param file The file.
+     * @return The permissions for the file.
+     */
     protected List<String> getFilePermissions(final GSuiteClient client, final File file) {
         final List<String> permissionList = new ArrayList<>();
         if (file.getPermissions() != null) {
@@ -445,6 +587,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return permissionList;
     }
 
+    /**
+     * Returns the permission for a user.
+     * @param user The user.
+     * @return The permission for the user.
+     */
     protected String getPermission(final User user) {
         if (logger.isDebugEnabled()) {
             logger.debug("user: {}", user);
@@ -452,6 +599,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return getPermission("user", user.getEmailAddress());
     }
 
+    /**
+     * Returns the permission for a permission.
+     * @param permission The permission.
+     * @return The permission for the permission.
+     */
     protected String getPermission(final Permission permission) {
         if (logger.isDebugEnabled()) {
             logger.debug("permission: {}", permission);
@@ -462,6 +614,12 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return getPermission(permission.getType(), permission.getEmailAddress());
     }
 
+    /**
+     * Returns the permission for a type and value.
+     * @param type The type.
+     * @param value The value.
+     * @return The permission for the type and value.
+     */
     protected String getPermission(final String type, final String value) {
         if (value == null) {
             return null;
@@ -478,6 +636,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return null;
     }
 
+    /**
+     * Returns the URL for a file.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param file The file.
+     * @return The URL for the file.
+     */
     protected String getUrl(final Map<String, Object> configMap, final DataStoreParams paramMap, final File file) {
         final String url = file.getWebContentLink();
         if (StringUtil.isBlank(url)) {
@@ -492,6 +657,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         return url;
     }
 
+    /**
+     * Returns the contents of a file.
+     * @param client The GSuiteClient.
+     * @param file The file.
+     * @param ignoreError Whether to ignore errors.
+     * @return The contents of the file.
+     */
     protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
         final String mimeType = file.getMimeType();
         final String id = file.getId();
@@ -544,6 +716,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
     }
 
+    /**
+     * Sets the name of the extractor to use.
+     * @param extractorName The name of the extractor to use.
+     */
     public void setExtractorName(final String extractorName) {
         this.extractorName = extractorName;
     }
