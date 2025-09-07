@@ -701,7 +701,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
 
         try (final InputStream in = client.getFileInputStream(id)) {
-            return ComponentUtil.getExtractorFactory().builder(in, null).mimeType(mimeType).extractorName(extractorName).extract()
+            return ComponentUtil.getExtractorFactory()
+                    .builder(in, null)
+                    .mimeType(mimeType)
+                    .extractorName(extractorName)
+                    .extract()
                     .getContent();
         } catch (final Exception e) {
             if (!ignoreError && !ComponentUtil.getFessConfig().isCrawlerIgnoreContentException()) {
