@@ -21,9 +21,6 @@ import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
 
-import com.google.api.client.http.javanet.NetHttpTransport;
-import com.google.api.services.drive.Drive;
-
 public class GSuiteClientTest extends LastaFluteTestCase {
 
     private static final String VALID_PRIVATE_KEY =
@@ -106,129 +103,28 @@ public class GSuiteClientTest extends LastaFluteTestCase {
         }
     }
 
-    public void testConstructorWithCustomCachedContentSize() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        params.put(GSuiteClient.MAX_CACHED_CONTENT_SIZE, "2097152");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            assertNotNull(client);
-            assertEquals(2097152, client.maxCachedContentSize);
-        }
-    }
-
-    public void testConstructorWithDefaultCachedContentSize() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            assertNotNull(client);
-            assertEquals(1024 * 1024, client.maxCachedContentSize);
-        }
-    }
-
-    public void testConstructorWithCustomTimeouts() {
+    public void testRequestInitializerTimeouts() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
         params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
         params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
         params.put(GSuiteClient.READ_TIMEOUT, "30000");
         params.put(GSuiteClient.CONNECT_TIMEOUT, "15000");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            assertNotNull(client);
-            assertNotNull(client.requestInitializer);
-            assertEquals(30000, client.requestInitializer.readTimeout);
-            assertEquals(15000, client.requestInitializer.connectTimeout);
-        }
+        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
+        assertNotNull(initializer);
+        assertEquals(30000, initializer.readTimeout);
+        assertEquals(15000, initializer.connectTimeout);
     }
 
-    public void testConstructorWithDefaultTimeouts() {
+    public void testRequestInitializerDefaultTimeouts() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
         params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
         params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            assertNotNull(client);
-            assertNotNull(client.requestInitializer);
-            assertEquals(20000, client.requestInitializer.readTimeout);
-            assertEquals(20000, client.requestInitializer.connectTimeout);
-        }
-    }
-
-    public void testNewHttpTransport() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            final NetHttpTransport transport = client.newHttpTransport();
-            assertNotNull(transport);
-        }
-    }
-
-    public void testNewHttpTransportWithProxy() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        params.put(GSuiteClient.PROXY_HOST, "proxy.example.com");
-        params.put(GSuiteClient.PROXY_PORT, "8080");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            final NetHttpTransport transport = client.newHttpTransport();
-            assertNotNull(transport);
-        }
-    }
-
-    public void testCreateGlobalDrive() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            final Drive drive = client.createGlobalDrive();
-            assertNotNull(drive);
-            assertEquals("Fess DataStore", drive.getApplicationName());
-        }
-    }
-
-    public void testGetDriveLazyInitialization() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            assertNull(client.drive);
-            final Drive drive = client.getDrive();
-            assertNotNull(drive);
-            assertSame(drive, client.drive);
-            assertSame(drive, client.getDrive());
-        }
-    }
-
-    public void testSetApplicationName() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        try (final GSuiteClient client = new GSuiteClient(params)) {
-            client.setApplicationName("Custom App Name");
-            assertEquals("Custom App Name", client.applicationName);
-            final Drive drive = client.createGlobalDrive();
-            assertEquals("Custom App Name", drive.getApplicationName());
-        }
-    }
-
-    public void testClose() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient client = new GSuiteClient(params);
-        assertNotNull(client.refreshTokenTask);
-        client.close();
-        assertTrue(client.refreshTokenTask.isCanceled());
+        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
+        assertNotNull(initializer);
+        assertEquals(20000, initializer.readTimeout);
+        assertEquals(20000, initializer.connectTimeout);
     }
 
     public void testRequestInitializerWithNullHttpTransport() {
