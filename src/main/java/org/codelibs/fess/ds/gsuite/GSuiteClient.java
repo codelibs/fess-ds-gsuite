@@ -111,6 +111,9 @@ public class GSuiteClient implements AutoCloseable {
     /** JWT token validity duration in milliseconds (1 hour). */
     protected static final long JWT_TOKEN_VALIDITY_MS = 3600000L;
 
+    /** Pattern for cleaning up PEM-encoded private keys (removes headers, footers, and newlines). */
+    protected static final String PEM_CLEANUP_PATTERN = "\\\\n|\\n|-----[A-Z ]+-----";
+
     /** The Google Drive client. */
     protected Drive drive;
     /** The HTTP transport. */
@@ -443,7 +446,7 @@ public class GSuiteClient implements AutoCloseable {
             try {
                 // Remove PEM headers/footers (e.g., "-----BEGIN PRIVATE KEY-----")
                 // Also handle both escaped newlines (\n) and actual newlines
-                final String replaced = privateKeyPem.replaceAll("\\\\n|\\n|-----[A-Z ]+-----", StringUtil.EMPTY).trim();
+                final String replaced = privateKeyPem.replaceAll(PEM_CLEANUP_PATTERN, StringUtil.EMPTY).trim();
 
                 if (replaced.isEmpty()) {
                     throw new IllegalArgumentException("Private key content is empty after removing PEM headers");

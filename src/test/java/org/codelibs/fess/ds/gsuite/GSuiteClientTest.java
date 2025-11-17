@@ -148,6 +148,7 @@ public class GSuiteClientTest extends LastaFluteTestCase {
         assertEquals(20 * 1000, GSuiteClient.DEFAULT_READ_TIMEOUT_MS);
         assertEquals(20 * 1000, GSuiteClient.DEFAULT_CONNECT_TIMEOUT_MS);
         assertEquals(3600000L, GSuiteClient.JWT_TOKEN_VALIDITY_MS);
+        assertEquals("\\\\n|\\n|-----[A-Z ]+-----", GSuiteClient.PEM_CLEANUP_PATTERN);
     }
 
     public void testGetPrivateKey_WithEmptyKey() {
