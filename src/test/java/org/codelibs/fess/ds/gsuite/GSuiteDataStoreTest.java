@@ -237,4 +237,53 @@ public class GSuiteDataStoreTest extends LastaFluteTestCase {
         assertEquals("url", GoogleDriveDataStore.FILE_URL);
         assertEquals("roles", GoogleDriveDataStore.FILE_ROLES);
     }
+
+    public void testDefaultThreadPoolTimeoutSeconds() {
+        assertEquals(60L, GoogleDriveDataStore.DEFAULT_THREAD_POOL_TIMEOUT_SECONDS);
+    }
+
+    public void testGoogleAppsMimeTypePattern() {
+        assertNotNull(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN);
+        assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.document").matches());
+        assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.spreadsheet").matches());
+        assertFalse(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/pdf").matches());
+    }
+
+    public void testBuildFileMap() {
+        final File file = new File();
+        file.setId("test123");
+        file.setName("TestFile.pdf");
+        file.setDescription("Test description");
+        file.setMimeType("application/pdf");
+        file.setSize(1024L);
+        file.setWebViewLink("https://drive.google.com/file/d/test123/view");
+
+        final String content = "Test content";
+        final long size = 1024L;
+        final String url = "https://drive.google.com/file/d/test123/view";
+
+        final java.util.Map<String, Object> fileMap = dataStore.buildFileMap(file, content, size, url);
+
+        assertNotNull(fileMap);
+        assertEquals("TestFile.pdf", fileMap.get(GoogleDriveDataStore.FILE_NAME));
+        assertEquals("Test description", fileMap.get(GoogleDriveDataStore.FILE_DESCRIPTION));
+        assertEquals("Test content", fileMap.get(GoogleDriveDataStore.FILE_CONTENTS));
+        assertEquals("application/pdf", fileMap.get(GoogleDriveDataStore.FILE_MIMETYPE));
+        assertEquals(1024L, fileMap.get(GoogleDriveDataStore.FILE_SIZE));
+        assertEquals(url, fileMap.get(GoogleDriveDataStore.FILE_URL));
+        assertEquals("test123", fileMap.get(GoogleDriveDataStore.FILE_ID));
+    }
+
+    public void testBuildFileMap_WithNullDescription() {
+        final File file = new File();
+        file.setId("test123");
+        file.setName("TestFile.pdf");
+        file.setDescription(null);
+        file.setMimeType("application/pdf");
+
+        final java.util.Map<String, Object> fileMap = dataStore.buildFileMap(file, "content", 100L, "url");
+
+        assertNotNull(fileMap);
+        assertEquals("", fileMap.get(GoogleDriveDataStore.FILE_DESCRIPTION));
+    }
 }

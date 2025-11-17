@@ -68,6 +68,12 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     /** Default maximum size of a file to be indexed. */
     protected static final long DEFAULT_MAX_SIZE = 10000000L; // 10m
 
+    /** Default thread pool termination timeout in seconds. */
+    protected static final long DEFAULT_THREAD_POOL_TIMEOUT_SECONDS = 60L;
+
+    /** Pattern for matching Google Apps MIME types. */
+    protected static final Pattern GOOGLE_APPS_MIMETYPE_PATTERN = Pattern.compile("application/vnd\\.google-apps\\.(.*)");
+
     // parameters
     /** Parameter key for the maximum file size. */
     protected static final String MAX_SIZE = "max_size";
@@ -348,11 +354,180 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 logger.debug("Shutting down thread executor.");
             }
             executorService.shutdown();
-            executorService.awaitTermination(60, TimeUnit.SECONDS);
+            executorService.awaitTermination(DEFAULT_THREAD_POOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
             throw new InterruptedRuntimeException(e);
         } finally {
             executorService.shutdownNow();
+        }
+    }
+
+    /**
+     * Checks if a file should be processed based on filtering rules.
+     * @param file The file to check.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param statsKey The stats key for tracking.
+     * @param crawlerStatsHelper The crawler stats helper.
+     * @return true if the file should be processed, false otherwise.
+     */
+    protected boolean shouldProcessFile(final File file, final Map<String, Object> configMap, final DataStoreParams paramMap,
+            final StatsKeyObject statsKey, final CrawlerStatsHelper crawlerStatsHelper) {
+        final String mimetype = file.getMimeType();
+
+        // Check if folder should be ignored
+        if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Ignore item: {}", file.getWebContentLink());
+            }
+            crawlerStatsHelper.discard(statsKey);
+            return false;
+        }
+
+        // Check supported MIME types
+        final String[] supportedMimeTypes = (String[]) configMap.get(SUPPORTED_MIMETYPES);
+        if (!Stream.of(supportedMimeTypes).anyMatch(mimetype::matches)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("{} is not an indexing target.", mimetype);
+            }
+            crawlerStatsHelper.discard(statsKey);
+            return false;
+        }
+
+        // Check URL filter
+        final String url = getUrl(configMap, paramMap, file);
+        final UrlFilter urlFilter = (UrlFilter) configMap.get(URL_FILTER);
+        if (urlFilter != null && !urlFilter.match(url)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Not matched: {}", url);
+            }
+            crawlerStatsHelper.discard(statsKey);
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Builds the file metadata map.
+     * @param file The file to extract metadata from.
+     * @param content The file content.
+     * @param size The file size.
+     * @param url The file URL.
+     * @return The file metadata map.
+     */
+    protected Map<String, Object> buildFileMap(final File file, final String content, final long size, final String url) {
+        final String mimetype = file.getMimeType();
+        final String filetype = ComponentUtil.getFileTypeHelper().get(mimetype);
+        final Map<String, Object> fileMap = new HashMap<>();
+
+        fileMap.put(FILE_NAME, file.getName());
+        fileMap.put(FILE_DESCRIPTION, file.getDescription() != null ? file.getDescription() : "");
+        fileMap.put(FILE_CONTENTS, content);
+        fileMap.put(FILE_MIMETYPE, mimetype);
+        fileMap.put(FILE_FILETYPE, filetype);
+        fileMap.put(FILE_SIZE, size);
+        fileMap.put(FILE_WEB_VIEW_LINK, file.getWebViewLink());
+        fileMap.put(FILE_WEB_CONTENT_LINK, file.getWebContentLink());
+        fileMap.put(FILE_URL, url);
+        fileMap.put(FILE_CLASS_INFO, file.getClassInfo());
+        fileMap.put(FILE_CONTENT_HINTS, file.getContentHints());
+        fileMap.put(FILE_CAPABILITIES, file.getCapabilities());
+        fileMap.put(FILE_APP_PROPERTIES, file.getAppProperties());
+        fileMap.put(FILE_COPY_REQUIRES_WRITER_PERMISSION, file.getCopyRequiresWriterPermission());
+        fileMap.put(FILE_EXPLICITLY_TRASHED, file.getExplicitlyTrashed());
+        fileMap.put(FILE_EXPORT_LINKS, file.getExportLinks());
+        fileMap.put(FILE_FILE_EXTENSION, file.getFileExtension());
+        fileMap.put(FILE_FOLDER_COLOR_RGB, file.getFolderColorRgb());
+        fileMap.put(FILE_FULL_FILE_EXTENSION, file.getFullFileExtension());
+        fileMap.put(FILE_HAS_AUGMENTED_PERMISSIONS, file.getHasAugmentedPermissions());
+        fileMap.put(FILE_HAS_THUMBNAIL, file.getHasThumbnail());
+        fileMap.put(FILE_HEAD_REVISION_ID, file.getHeadRevisionId());
+        fileMap.put(FILE_ICON_LINK, file.getIconLink());
+        fileMap.put(FILE_ID, file.getId());
+        fileMap.put(FILE_IMAGE_MEDIA_METADATA, file.getImageMediaMetadata());
+        fileMap.put(FILE_IS_APP_AUTHORIZED, file.getIsAppAuthorized());
+        fileMap.put(FILE_KIND, file.getKind());
+        fileMap.put(FILE_LAST_MODIFYING_USER, file.getLastModifyingUser());
+        fileMap.put(FILE_MD5_CHECKSUM, file.getMd5Checksum());
+        fileMap.put(FILE_MODIFIED_BY_ME, file.getModifiedByMe());
+        fileMap.put(FILE_MODIFIED_BY_ME_TIME, toDate(file.getModifiedByMeTime()));
+        fileMap.put(FILE_ORIGINAL_FILENAME, file.getOriginalFilename());
+        fileMap.put(FILE_OWNED_BY_ME, file.getOwnedByMe());
+        fileMap.put(FILE_OWNERS, file.getOwners());
+        fileMap.put(FILE_PARENTS, file.getParents());
+        fileMap.put(FILE_QUOTA_BYTES_USED, file.getQuotaBytesUsed());
+        fileMap.put(FILE_SHARED, file.getShared());
+        fileMap.put(FILE_TEAM_DRIVE_ID, file.getTeamDriveId());
+        fileMap.put(FILE_THUMBNAIL_VERSION, file.getThumbnailVersion());
+        fileMap.put(FILE_TRASHED, file.getTrashed());
+        fileMap.put(FILE_TRASHED_TIME, toDate(file.getTrashedTime()));
+        fileMap.put(FILE_TRASHING_USER, file.getTrashingUser());
+        fileMap.put(FILE_VERSION, file.getVersion());
+        fileMap.put(FILE_VIDEO_MEDIA_METADATA, file.getVideoMediaMetadata());
+        fileMap.put(FILE_VIEWED_BY_ME, file.getViewedByMe());
+        fileMap.put(FILE_VIEWED_BY_ME_TIME, toDate(file.getViewedByMeTime()));
+        fileMap.put(FILE_VIEWERS_CAN_COPY_CONTENT, file.getViewersCanCopyContent());
+        fileMap.put(FILE_WRITERS_CAN_SHARE, file.getWritersCanShare());
+        fileMap.put(FILE_THUMBNAIL_LINK, file.getThumbnailLink());
+        fileMap.put(FILE_CREATED_TIME, toDate(file.getCreatedTime()));
+        fileMap.put(FILE_MODIFIED_TIME, toDate(file.getModifiedTime()));
+
+        return fileMap;
+    }
+
+    /**
+     * Handles errors during file processing.
+     * @param dataConfig The data configuration.
+     * @param file The file being processed.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param dataMap The data map.
+     * @param statsKey The stats key.
+     * @param crawlerStatsHelper The crawler stats helper.
+     * @param t The throwable that was caught.
+     */
+    protected void handleProcessingError(final DataConfig dataConfig, final File file, final Map<String, Object> configMap,
+            final DataStoreParams paramMap, final Map<String, Object> dataMap, final StatsKeyObject statsKey,
+            final CrawlerStatsHelper crawlerStatsHelper, final Throwable t) {
+
+        if (t instanceof CrawlingAccessException) {
+            logger.warn("Crawling Access Exception at : {}", dataMap, t);
+
+            Throwable target = t;
+            if (target instanceof MultipleCrawlingAccessException ex) {
+                final Throwable[] causes = ex.getCauses();
+                if (causes.length > 0) {
+                    target = causes[causes.length - 1];
+                }
+            }
+
+            String errorName;
+            final Throwable cause = target.getCause();
+            if (cause != null) {
+                errorName = cause.getClass().getCanonicalName();
+            } else {
+                errorName = target.getClass().getCanonicalName();
+            }
+
+            String url = getUrl(configMap, paramMap, file);
+            if (url == null) {
+                url = StringUtil.EMPTY;
+            }
+
+            final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+            failureUrlService.store(dataConfig, errorName, url, target);
+            crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
+        } else {
+            String url = getUrl(configMap, paramMap, file);
+            if (url == null) {
+                url = StringUtil.EMPTY;
+            }
+
+            logger.warn("Crawling Access Exception at : {}", dataMap, t);
+            final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
+            failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), url, t);
+            crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
         }
     }
 
@@ -379,41 +554,20 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
             crawlerStatsHelper.begin(statsKey);
-            final String mimetype = file.getMimeType();
-            if (((Boolean) configMap.get(IGNORE_FOLDER)).booleanValue() && "application/vnd.google-apps.folder".equals(mimetype)) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("Ignore item: {}", file.getWebContentLink());
-                }
-                crawlerStatsHelper.discard(statsKey);
-                return;
-            }
 
-            final String[] supportedMimeTypes = (String[]) configMap.get(SUPPORTED_MIMETYPES);
-            if (!Stream.of(supportedMimeTypes).anyMatch(mimetype::matches)) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("{} is not an indexing target.", mimetype);
-                }
-                crawlerStatsHelper.discard(statsKey);
+            // Check if file should be processed (folder filtering, MIME type, URL filter)
+            if (!shouldProcessFile(file, configMap, paramMap, statsKey, crawlerStatsHelper)) {
                 return;
             }
 
             final String url = getUrl(configMap, paramMap, file);
-            final UrlFilter urlFilter = (UrlFilter) configMap.get(URL_FILTER);
-            if (urlFilter != null && !urlFilter.match(url)) {
-                if (logger.isDebugEnabled()) {
-                    logger.debug("Not matched: {}", url);
-                }
-                crawlerStatsHelper.discard(statsKey);
-                return;
-            }
-
             logger.info("Crawling URL: {}", url);
 
             final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
 
             final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
-            final Map<String, Object> fileMap = new HashMap<>();
 
+            // Extract file content
             final String content = getFileContents(client, file, ignoreError);
             final long size;
             if (file.getSize() != null) {
@@ -424,63 +578,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 size = 0;
             }
 
+            // Check file size
             if (size > ((Long) configMap.get(MAX_SIZE)).longValue()) {
                 throw new MaxLengthExceededException(
                         "The content length (" + size + " byte) is over " + configMap.get(MAX_SIZE) + " byte. The url is " + url);
             }
 
-            final String filetype = ComponentUtil.getFileTypeHelper().get(mimetype);
-            fileMap.put(FILE_NAME, file.getName());
-            fileMap.put(FILE_DESCRIPTION, file.getDescription() != null ? file.getDescription() : "");
-            fileMap.put(FILE_CONTENTS, content);
-            fileMap.put(FILE_MIMETYPE, mimetype);
-            fileMap.put(FILE_FILETYPE, filetype);
-            fileMap.put(FILE_SIZE, size);
-            fileMap.put(FILE_WEB_VIEW_LINK, file.getWebViewLink());
-            fileMap.put(FILE_WEB_CONTENT_LINK, file.getWebContentLink());
-            fileMap.put(FILE_URL, url);
-            fileMap.put(FILE_CLASS_INFO, file.getClassInfo());
-            fileMap.put(FILE_CONTENT_HINTS, file.getContentHints());
-            fileMap.put(FILE_CAPABILITIES, file.getCapabilities());
-            fileMap.put(FILE_APP_PROPERTIES, file.getAppProperties());
-            fileMap.put(FILE_COPY_REQUIRES_WRITER_PERMISSION, file.getCopyRequiresWriterPermission());
-            fileMap.put(FILE_EXPLICITLY_TRASHED, file.getExplicitlyTrashed());
-            fileMap.put(FILE_EXPORT_LINKS, file.getExportLinks());
-            fileMap.put(FILE_FILE_EXTENSION, file.getFileExtension());
-            fileMap.put(FILE_FOLDER_COLOR_RGB, file.getFolderColorRgb());
-            fileMap.put(FILE_FULL_FILE_EXTENSION, file.getFullFileExtension());
-            fileMap.put(FILE_HAS_AUGMENTED_PERMISSIONS, file.getHasAugmentedPermissions());
-            fileMap.put(FILE_HAS_THUMBNAIL, file.getHasThumbnail());
-            fileMap.put(FILE_HEAD_REVISION_ID, file.getHeadRevisionId());
-            fileMap.put(FILE_ICON_LINK, file.getIconLink());
-            fileMap.put(FILE_ID, file.getId());
-            fileMap.put(FILE_IMAGE_MEDIA_METADATA, file.getImageMediaMetadata());
-            fileMap.put(FILE_IS_APP_AUTHORIZED, file.getIsAppAuthorized());
-            fileMap.put(FILE_KIND, file.getKind());
-            fileMap.put(FILE_LAST_MODIFYING_USER, file.getLastModifyingUser());
-            fileMap.put(FILE_MD5_CHECKSUM, file.getMd5Checksum());
-            fileMap.put(FILE_MODIFIED_BY_ME, file.getModifiedByMe());
-            fileMap.put(FILE_MODIFIED_BY_ME_TIME, toDate(file.getModifiedByMeTime()));
-            fileMap.put(FILE_ORIGINAL_FILENAME, file.getOriginalFilename());
-            fileMap.put(FILE_OWNED_BY_ME, file.getOwnedByMe());
-            fileMap.put(FILE_OWNERS, file.getOwners());
-            fileMap.put(FILE_PARENTS, file.getParents());
-            fileMap.put(FILE_QUOTA_BYTES_USED, file.getQuotaBytesUsed());
-            fileMap.put(FILE_SHARED, file.getShared());
-            fileMap.put(FILE_TEAM_DRIVE_ID, file.getTeamDriveId());
-            fileMap.put(FILE_THUMBNAIL_VERSION, file.getThumbnailVersion());
-            fileMap.put(FILE_TRASHED, file.getTrashed());
-            fileMap.put(FILE_TRASHED_TIME, toDate(file.getTrashedTime()));
-            fileMap.put(FILE_TRASHING_USER, file.getTrashingUser());
-            fileMap.put(FILE_VERSION, file.getVersion());
-            fileMap.put(FILE_VIDEO_MEDIA_METADATA, file.getVideoMediaMetadata());
-            fileMap.put(FILE_VIEWED_BY_ME, file.getViewedByMe());
-            fileMap.put(FILE_VIEWED_BY_ME_TIME, toDate(file.getViewedByMeTime()));
-            fileMap.put(FILE_VIEWERS_CAN_COPY_CONTENT, file.getViewersCanCopyContent());
-            fileMap.put(FILE_WRITERS_CAN_SHARE, file.getWritersCanShare());
-            fileMap.put(FILE_THUMBNAIL_LINK, file.getThumbnailLink());
-            fileMap.put(FILE_CREATED_TIME, toDate(file.getCreatedTime()));
-            fileMap.put(FILE_MODIFIED_TIME, toDate(file.getModifiedTime()));
+            // Build file metadata map
+            final Map<String, Object> fileMap = buildFileMap(file, content, size, url);
 
             final List<String> permissions = getFilePermissions(client, file);
             final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
@@ -516,43 +621,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             callback.store(paramMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
-        } catch (final CrawlingAccessException e) {
-            logger.warn("Crawling Access Exception at : {}", dataMap, e);
-
-            Throwable target = e;
-            if (target instanceof MultipleCrawlingAccessException ex) {
-                final Throwable[] causes = ex.getCauses();
-                if (causes.length > 0) {
-                    target = causes[causes.length - 1];
-                }
-            }
-
-            String errorName;
-            final Throwable cause = target.getCause();
-            if (cause != null) {
-                errorName = cause.getClass().getCanonicalName();
-            } else {
-                errorName = target.getClass().getCanonicalName();
-            }
-
-            String url = getUrl(configMap, paramMap, file);
-            if (url == null) {
-                url = StringUtil.EMPTY;
-            }
-
-            final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
-            failureUrlService.store(dataConfig, errorName, url, target);
-            crawlerStatsHelper.record(statsKey, StatsAction.ACCESS_EXCEPTION);
         } catch (final Throwable t) {
-            String url = getUrl(configMap, paramMap, file);
-            if (url == null) {
-                url = StringUtil.EMPTY;
-            }
-
-            logger.warn("Crawling Access Exception at : {}", dataMap, t);
-            final FailureUrlService failureUrlService = ComponentUtil.getComponent(FailureUrlService.class);
-            failureUrlService.store(dataConfig, t.getClass().getCanonicalName(), url, t);
-            crawlerStatsHelper.record(statsKey, StatsAction.EXCEPTION);
+            handleProcessingError(dataConfig, file, configMap, paramMap, dataMap, statsKey, crawlerStatsHelper, t);
         } finally {
             crawlerStatsHelper.done(statsKey);
         }
@@ -659,6 +729,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Returns the contents of a file.
+     * Handles different file types appropriately:
+     * - Google Docs/Presentations: exported as plain text
+     * - Google Sheets: exported as CSV
+     * - Google Apps Script: JSON parsed to extract script source code
+     * - Other files: extracted using Tika extractor
      * @param client The GSuiteClient.
      * @param file The file.
      * @param ignoreError Whether to ignore errors.
@@ -667,15 +742,22 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
         final String mimeType = file.getMimeType();
         final String id = file.getId();
-        final Matcher m = Pattern.compile("application/vnd\\.google-apps\\.(.*)").matcher(mimeType);
+
+        // Check if this is a Google Apps file (e.g., application/vnd.google-apps.document)
+        final Matcher m = GOOGLE_APPS_MIMETYPE_PATTERN.matcher(mimeType);
         if (m.matches()) {
-            switch (m.group(1)) {
+            final String appType = m.group(1); // Extract the app type (e.g., "document", "spreadsheet")
+            switch (appType) {
             case "document":
             case "presentation":
+                // Export Google Docs and Presentations as plain text
                 return client.extractFileText(id, "text/plain");
             case "spreadsheet":
+                // Export Google Sheets as CSV format
                 return client.extractFileText(id, "text/csv");
             case "script":
+                // Google Apps Script files are exported as JSON
+                // Parse the JSON to extract script file names and source code
                 final String text = client.extractFileText(id, "application/vnd.google-apps.script+json");
                 final StringBuilder sb = new StringBuilder();
                 try {
@@ -684,6 +766,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                     if (map.containsKey("files")) {
                         @SuppressWarnings("unchecked")
                         final List<Map<String, Object>> files = (List<Map<String, Object>>) map.get("files");
+                        // Concatenate file names and their source code for indexing
                         files.forEach(f -> {
                             sb.append(f.getOrDefault("name", StringUtil.EMPTY));
                             sb.append("\n");
@@ -696,6 +779,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 }
                 return sb.toString();
             default:
+                // Other Google Apps file types (forms, drawings, etc.) are not explicitly handled
                 break;
             }
         }

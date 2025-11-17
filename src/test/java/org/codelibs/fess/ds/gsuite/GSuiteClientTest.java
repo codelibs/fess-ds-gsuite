@@ -141,4 +141,40 @@ public class GSuiteClientTest extends LastaFluteTestCase {
     public void testAllDrivesConstant() {
         assertEquals("allDrives", GSuiteClient.ALL_DRIVES);
     }
+
+    public void testDefaultConstants() {
+        assertEquals(1024 * 1024, GSuiteClient.DEFAULT_MAX_CACHED_CONTENT_SIZE);
+        assertEquals("3540", GSuiteClient.DEFAULT_REFRESH_TOKEN_INTERVAL);
+        assertEquals(20 * 1000, GSuiteClient.DEFAULT_READ_TIMEOUT_MS);
+        assertEquals(20 * 1000, GSuiteClient.DEFAULT_CONNECT_TIMEOUT_MS);
+        assertEquals(3600000L, GSuiteClient.JWT_TOKEN_VALIDITY_MS);
+    }
+
+    public void testGetPrivateKey_WithEmptyKey() {
+        final DataStoreParams params = new DataStoreParams();
+        params.put(GSuiteClient.PRIVATE_KEY_PARAM, "-----BEGIN PRIVATE KEY-----\\n-----END PRIVATE KEY-----\\n");
+        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
+        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
+        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
+        try {
+            initializer.getPrivateKey();
+            fail("Expected InvalidKeySpecException");
+        } catch (final Exception e) {
+            assertTrue(e.getMessage().contains("Private key content is empty") || e.getMessage().contains("Failed to decode"));
+        }
+    }
+
+    public void testGetPrivateKey_WithInvalidBase64() {
+        final DataStoreParams params = new DataStoreParams();
+        params.put(GSuiteClient.PRIVATE_KEY_PARAM, "-----BEGIN PRIVATE KEY-----\\nInvalidBase64!!!\\n-----END PRIVATE KEY-----\\n");
+        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
+        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
+        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
+        try {
+            initializer.getPrivateKey();
+            fail("Expected InvalidKeySpecException");
+        } catch (final Exception e) {
+            assertTrue(e.getMessage().contains("Failed to decode") || e.getMessage().contains("Illegal base64"));
+        }
+    }
 }
