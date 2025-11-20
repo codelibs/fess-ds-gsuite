@@ -237,4 +237,19 @@ public class GSuiteDataStoreTest extends LastaFluteTestCase {
         assertEquals("url", GoogleDriveDataStore.FILE_URL);
         assertEquals("roles", GoogleDriveDataStore.FILE_ROLES);
     }
+
+    public void testDefaultThreadPoolTimeoutSeconds() {
+        assertEquals(60L, GoogleDriveDataStore.DEFAULT_THREAD_POOL_TIMEOUT_SECONDS);
+    }
+
+    public void testGoogleAppsMimeTypePattern() {
+        assertNotNull(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN);
+        assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.document").matches());
+        assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.spreadsheet").matches());
+        assertFalse(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/pdf").matches());
+    }
+
+    // Note: buildFileMap() tests are omitted as they require integration test environment
+    // with ComponentUtil dependencies (FileTypeHelper) which are not available in unit tests.
+    // The functionality is covered by integration tests.
 }

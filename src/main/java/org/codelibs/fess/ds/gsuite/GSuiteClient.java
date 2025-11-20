@@ -96,6 +96,24 @@ public class GSuiteClient implements AutoCloseable {
     /** Constant for all drives. */
     public static final String ALL_DRIVES = "allDrives";
 
+    /** Default maximum cached content size in bytes (1MB). */
+    protected static final int DEFAULT_MAX_CACHED_CONTENT_SIZE = 1024 * 1024;
+
+    /** Default refresh token interval in seconds (59 minutes). */
+    protected static final String DEFAULT_REFRESH_TOKEN_INTERVAL = "3540";
+
+    /** Default read timeout in milliseconds (20 seconds). */
+    protected static final int DEFAULT_READ_TIMEOUT_MS = 20 * 1000;
+
+    /** Default connect timeout in milliseconds (20 seconds). */
+    protected static final int DEFAULT_CONNECT_TIMEOUT_MS = 20 * 1000;
+
+    /** JWT token validity duration in milliseconds (1 hour). */
+    protected static final long JWT_TOKEN_VALIDITY_MS = 3600000L;
+
+    /** Pattern for cleaning up PEM-encoded private keys (removes headers, footers, and newlines). */
+    protected static final String PEM_CLEANUP_PATTERN = "\\\\n|\\n|-----[A-Z ]+-----";
+
     /** The Google Drive client. */
     protected Drive drive;
     /** The HTTP transport. */
@@ -104,7 +122,7 @@ public class GSuiteClient implements AutoCloseable {
     protected DataStoreParams params;
 
     /** The maximum size of content to be cached in memory. */
-    protected int maxCachedContentSize = 1024 * 1024;
+    protected int maxCachedContentSize = DEFAULT_MAX_CACHED_CONTENT_SIZE;
 
     /** The request initializer. */
     protected RequestInitializer requestInitializer;
@@ -128,7 +146,7 @@ public class GSuiteClient implements AutoCloseable {
         }
         requestInitializer = new RequestInitializer(params, httpTransport);
         refreshTokenTask = TimeoutManager.getInstance()
-                .addTimeoutTarget(requestInitializer, Integer.parseInt(params.getAsString(REFRESH_TOKEN_INTERVAL, "3540")), true);
+                .addTimeoutTarget(requestInitializer, Integer.parseInt(params.getAsString(REFRESH_TOKEN_INTERVAL, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
     }
 
     @Override
@@ -323,9 +341,9 @@ public class GSuiteClient implements AutoCloseable {
         /** The access token. */
         protected String accessToken;
         /** The read timeout in milliseconds. */
-        protected int readTimeout = 20 * 1000;
+        protected int readTimeout = DEFAULT_READ_TIMEOUT_MS;
         /** The connect timeout in milliseconds. */
-        protected int connectTimeout = 20 * 1000;
+        protected int connectTimeout = DEFAULT_CONNECT_TIMEOUT_MS;
 
         /**
          * Constructs a new RequestInitializer.
@@ -356,7 +374,12 @@ public class GSuiteClient implements AutoCloseable {
         }
 
         /**
-         * Refreshes the access token.
+         * Refreshes the OAuth2 access token using JWT authentication.
+         * This method implements the Google OAuth2 service account flow:
+         * 1. Creates a JWT (JSON Web Token) signed with the service account's private key
+         * 2. Sends the JWT to Google's token endpoint
+         * 3. Receives and stores the access token for API requests
+         * The access token is automatically refreshed periodically based on the configured interval.
          */
         protected void refreshToken() {
             if (httpTransport == null) {
@@ -367,18 +390,22 @@ public class GSuiteClient implements AutoCloseable {
             }
             final long now = System.currentTimeMillis();
             try {
+                // Step 1: Create JWT (JSON Web Token) assertion
+                // The JWT includes service account credentials and requested scopes
                 final String jwt = JWT.create() //
-                        .withKeyId(privateKeyId) //
-                        .withIssuer(clientEmail) //
-                        .withSubject(clientEmail) //
-                        .withAudience("https://www.googleapis.com/oauth2/v4/token") //
-                        .withClaim("scope", "https://www.googleapis.com/auth/drive") //
-                        .withIssuedAt(new Date(now)) //
-                        .withExpiresAt(new Date(now + 3600000L)) //
-                        .sign(Algorithm.RSA256(null, (RSAPrivateKey) getPrivateKey()));
+                        .withKeyId(privateKeyId) // Service account key ID
+                        .withIssuer(clientEmail) // Service account email (issuer)
+                        .withSubject(clientEmail) // Service account email (subject)
+                        .withAudience("https://www.googleapis.com/oauth2/v4/token") // Google's token endpoint
+                        .withClaim("scope", "https://www.googleapis.com/auth/drive") // Request Drive API access
+                        .withIssuedAt(new Date(now)) // Current timestamp
+                        .withExpiresAt(new Date(now + JWT_TOKEN_VALIDITY_MS)) // JWT expires in 1 hour
+                        .sign(Algorithm.RSA256(null, (RSAPrivateKey) getPrivateKey())); // Sign with private key
                 if (logger.isDebugEnabled()) {
                     logger.debug("jwt: {}", jwt);
                 }
+
+                // Step 2: Exchange JWT for access token
                 final GenericUrl url = new GenericUrl("https://www.googleapis.com/oauth2/v4/token");
                 final GenericData data = new GenericData();
                 data.set("assertion", jwt);
@@ -388,6 +415,8 @@ public class GSuiteClient implements AutoCloseable {
                 if (logger.isDebugEnabled()) {
                     logger.debug("response: {}", response);
                 }
+
+                // Step 3: Parse and store the access token
                 try {
                     final ObjectMapper mapper = new ObjectMapper();
                     final TokenResponse token = mapper.readValue(response.getContent(), TokenResponse.class);
@@ -406,16 +435,37 @@ public class GSuiteClient implements AutoCloseable {
 
         /**
          * Returns the private key.
+         * Parses a PEM-encoded private key by removing header/footer lines and newlines,
+         * then decoding the Base64 content into a PKCS8 key specification.
          * @return The private key.
-         * @throws NoSuchAlgorithmException If the algorithm is not available.
+         * @throws NoSuchAlgorithmException If the RSA algorithm is not available.
          * @throws InvalidKeySpecException If the key specification is invalid.
+         * @throws IllegalArgumentException If the Base64 content is invalid.
          */
         protected PrivateKey getPrivateKey() throws NoSuchAlgorithmException, InvalidKeySpecException {
-            final String replaced = privateKeyPem.replaceAll("\\\\n|\\n|-----[A-Z ]+-----", StringUtil.EMPTY);
-            final byte[] bytes = Base64.getDecoder().decode(replaced);
-            final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
-            final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
-            return keyFactory.generatePrivate(keySpec);
+            try {
+                // Remove PEM headers/footers (e.g., "-----BEGIN PRIVATE KEY-----")
+                // Also handle both escaped newlines (\n) and actual newlines
+                final String replaced = privateKeyPem.replaceAll(PEM_CLEANUP_PATTERN, StringUtil.EMPTY).trim();
+
+                if (replaced.isEmpty()) {
+                    throw new IllegalArgumentException("Private key content is empty after removing PEM headers");
+                }
+
+                // Decode Base64 content
+                final byte[] bytes = Base64.getDecoder().decode(replaced);
+
+                if (bytes.length == 0) {
+                    throw new IllegalArgumentException("Decoded private key has zero length");
+                }
+
+                // Create PKCS8 key specification and generate private key
+                final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
+                final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
+                return keyFactory.generatePrivate(keySpec);
+            } catch (final IllegalArgumentException e) {
+                throw new InvalidKeySpecException("Failed to decode private key: " + e.getMessage(), e);
+            }
         }
 
         @Override
