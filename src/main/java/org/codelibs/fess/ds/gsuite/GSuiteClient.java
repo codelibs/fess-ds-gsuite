@@ -146,7 +146,8 @@ public class GSuiteClient implements AutoCloseable {
         }
         requestInitializer = new RequestInitializer(params, httpTransport);
         refreshTokenTask = TimeoutManager.getInstance()
-                .addTimeoutTarget(requestInitializer, Integer.parseInt(params.getAsString(REFRESH_TOKEN_INTERVAL, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
+                .addTimeoutTarget(requestInitializer,
+                        Integer.parseInt(params.getAsString(REFRESH_TOKEN_INTERVAL, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
     }
 
     @Override
