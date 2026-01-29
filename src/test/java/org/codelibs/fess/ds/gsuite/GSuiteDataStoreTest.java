@@ -15,19 +15,21 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import org.junit.jupiter.api.TestInfo;
+
 import java.util.Date;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.util.ComponentUtil;
-import org.dbflute.utflute.lastaflute.LastaFluteTestCase;
+import org.codelibs.fess.ds.gsuite.UnitDsTestCase;
 
 import com.google.api.client.util.DateTime;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.Permission;
 
-public class GSuiteDataStoreTest extends LastaFluteTestCase {
+public class GSuiteDataStoreTest extends UnitDsTestCase {
 
     private GoogleDriveDataStore dataStore;
 
@@ -42,15 +44,15 @@ public class GSuiteDataStoreTest extends LastaFluteTestCase {
     }
 
     @Override
-    public void setUp() throws Exception {
-        super.setUp();
+    public void setUp(TestInfo testInfo) throws Exception {
+        super.setUp(testInfo);
         dataStore = new GoogleDriveDataStore();
     }
 
     @Override
-    public void tearDown() throws Exception {
+    public void tearDown(TestInfo testInfo) throws Exception {
         ComponentUtil.setFessConfig(null);
-        super.tearDown();
+        super.tearDown(testInfo);
     }
 
     public void testGetName() {
