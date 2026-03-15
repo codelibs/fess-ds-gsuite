@@ -423,7 +423,11 @@ public class GSuiteClient implements AutoCloseable {
                     final TokenResponse token = mapper.readValue(response.getContent(), TokenResponse.class);
 
                     if (logger.isDebugEnabled()) {
-                        logger.debug("Update: {} -> {}", accessToken, token.getAccessToken());
+                        final String newToken = token.getAccessToken();
+                        logger.debug("Update: ***{} -> ***{}",
+                                accessToken != null ? accessToken.substring(accessToken.length() - Math.min(4, accessToken.length()))
+                                        : "null",
+                                newToken != null ? newToken.substring(newToken.length() - Math.min(4, newToken.length())) : "null");
                     }
                     accessToken = token.getAccessToken();
                 } finally {
