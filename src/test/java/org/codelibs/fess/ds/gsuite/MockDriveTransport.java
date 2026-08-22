@@ -27,6 +27,14 @@ import com.google.api.client.testing.http.MockLowLevelHttpResponse;
 
 /**
  * A {@link MockHttpTransport} that replays queued responses in FIFO order and records requested URLs.
+ *
+ * <p>
+ * <strong>Single-threaded correlation only.</strong> The URL log and the response queue are updated in
+ * separate critical sections: {@code buildRequest} records the URL, and the returned request polls the
+ * queue later. Each structure is individually thread-safe, but under concurrent use the Nth entry of
+ * {@link #getRequestedUrls()} does not necessarily correspond to the Nth queued response. Tests that
+ * assert on that pairing must drive this transport from a single thread.
+ * </p>
  */
 public class MockDriveTransport extends MockHttpTransport {
 
