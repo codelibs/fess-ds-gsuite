@@ -16,6 +16,7 @@
 package org.codelibs.fess.ds.gsuite;
 
 import org.junit.jupiter.api.TestInfo;
+import org.junit.jupiter.api.Test;
 
 import java.security.PrivateKey;
 
@@ -38,6 +39,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         return true;
     }
 
+    @Test
     public void testPrivateKey() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
@@ -53,6 +55,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void testPrivateKeyWithNewlines() {
         final String privateKeyWithNewlines = VALID_PRIVATE_KEY.replace("\\n", "\n");
         final DataStoreParams params = new DataStoreParams();
@@ -69,6 +72,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void testConstructorWithMissingPrivateKey() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
@@ -81,6 +85,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void testConstructorWithMissingPrivateKeyId() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
@@ -93,6 +98,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void testConstructorWithMissingClientEmail() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
@@ -105,6 +111,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void testRequestInitializerTimeouts() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
@@ -118,6 +125,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         assertEquals(15000, initializer.connectTimeout);
     }
 
+    @Test
     public void testRequestInitializerDefaultTimeouts() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
@@ -129,6 +137,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         assertEquals(20000, initializer.connectTimeout);
     }
 
+    @Test
     public void testRequestInitializerWithNullHttpTransport() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
@@ -140,10 +149,12 @@ public class GSuiteClientTest extends UnitDsTestCase {
         assertEquals("test@example.com", initializer.clientEmail);
     }
 
+    @Test
     public void testAllDrivesConstant() {
         assertEquals("allDrives", GSuiteClient.ALL_DRIVES);
     }
 
+    @Test
     public void testDefaultConstants() {
         assertEquals(1024 * 1024, GSuiteClient.DEFAULT_MAX_CACHED_CONTENT_SIZE);
         assertEquals("3540", GSuiteClient.DEFAULT_REFRESH_TOKEN_INTERVAL);
@@ -153,6 +164,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         assertEquals("\\\\n|\\n|-----[A-Z ]+-----", GSuiteClient.PEM_CLEANUP_PATTERN);
     }
 
+    @Test
     public void testGetPrivateKey_WithEmptyKey() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, "-----BEGIN PRIVATE KEY-----\\n-----END PRIVATE KEY-----\\n");
@@ -167,6 +179,7 @@ public class GSuiteClientTest extends UnitDsTestCase {
         }
     }
 
+    @Test
     public void testGetPrivateKey_WithInvalidBase64() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, "-----BEGIN PRIVATE KEY-----\\nInvalidBase64!!!\\n-----END PRIVATE KEY-----\\n");
