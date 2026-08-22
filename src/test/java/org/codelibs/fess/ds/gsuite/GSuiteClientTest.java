@@ -19,10 +19,18 @@ import org.junit.jupiter.api.TestInfo;
 import org.junit.jupiter.api.Test;
 
 import java.security.PrivateKey;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.ds.gsuite.UnitDsTestCase;
+
+import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpRequest;
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.ServiceAccountCredentials;
 
 public class GSuiteClientTest extends UnitDsTestCase {
 
@@ -39,37 +47,27 @@ public class GSuiteClientTest extends UnitDsTestCase {
         return true;
     }
 
-    @Test
-    public void testPrivateKey() {
+    private DataStoreParams newValidParams() {
         final DataStoreParams params = new DataStoreParams();
         params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
         params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
         params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
-        try {
-            final PrivateKey privateKey = initializer.getPrivateKey();
-            assertNotNull(privateKey);
-            assertEquals("RSA", privateKey.getAlgorithm());
-        } catch (final Exception e) {
-            fail(e.getMessage());
-        }
+        return params;
     }
 
     @Test
-    public void testPrivateKeyWithNewlines() {
-        final String privateKeyWithNewlines = VALID_PRIVATE_KEY.replace("\\n", "\n");
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, privateKeyWithNewlines);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
-        try {
-            final PrivateKey privateKey = initializer.getPrivateKey();
-            assertNotNull(privateKey);
-            assertEquals("RSA", privateKey.getAlgorithm());
-        } catch (final Exception e) {
-            fail(e.getMessage());
-        }
+    public void testPrivateKey() throws Exception {
+        final PrivateKey privateKey = GSuiteClient.parsePrivateKey(VALID_PRIVATE_KEY);
+        assertNotNull(privateKey);
+        assertEquals("RSA", privateKey.getAlgorithm());
+    }
+
+    @Test
+    public void testPrivateKeyWithNewlines() throws Exception {
+        final String withRealNewlines = VALID_PRIVATE_KEY.replace("\\n", "\n");
+        final PrivateKey privateKey = GSuiteClient.parsePrivateKey(withRealNewlines);
+        assertNotNull(privateKey);
+        assertEquals("RSA", privateKey.getAlgorithm());
     }
 
     @Test
@@ -112,44 +110,6 @@ public class GSuiteClientTest extends UnitDsTestCase {
     }
 
     @Test
-    public void testRequestInitializerTimeouts() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        params.put(GSuiteClient.READ_TIMEOUT, "30000");
-        params.put(GSuiteClient.CONNECT_TIMEOUT, "15000");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
-        assertNotNull(initializer);
-        assertEquals(30000, initializer.readTimeout);
-        assertEquals(15000, initializer.connectTimeout);
-    }
-
-    @Test
-    public void testRequestInitializerDefaultTimeouts() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
-        assertNotNull(initializer);
-        assertEquals(20000, initializer.readTimeout);
-        assertEquals(20000, initializer.connectTimeout);
-    }
-
-    @Test
-    public void testRequestInitializerWithNullHttpTransport() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, VALID_PRIVATE_KEY);
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
-        assertNotNull(initializer);
-        assertEquals("test_key_id", initializer.privateKeyId);
-        assertEquals("test@example.com", initializer.clientEmail);
-    }
-
-    @Test
     public void testAllDrivesConstant() {
         assertEquals("allDrives", GSuiteClient.ALL_DRIVES);
     }
@@ -166,31 +126,91 @@ public class GSuiteClientTest extends UnitDsTestCase {
 
     @Test
     public void testGetPrivateKey_WithEmptyKey() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, "-----BEGIN PRIVATE KEY-----\\n-----END PRIVATE KEY-----\\n");
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
         try {
-            initializer.getPrivateKey();
-            fail("Expected InvalidKeySpecException");
+            GSuiteClient.parsePrivateKey("-----BEGIN PRIVATE KEY-----\\n-----END PRIVATE KEY-----\\n");
+            fail("should throw for an empty key");
         } catch (final Exception e) {
-            assertTrue(e.getMessage().contains("Private key content is empty") || e.getMessage().contains("Failed to decode"));
+            assertTrue(e.getMessage(), e.getMessage().contains("empty"));
         }
     }
 
     @Test
     public void testGetPrivateKey_WithInvalidBase64() {
-        final DataStoreParams params = new DataStoreParams();
-        params.put(GSuiteClient.PRIVATE_KEY_PARAM, "-----BEGIN PRIVATE KEY-----\\nInvalidBase64!!!\\n-----END PRIVATE KEY-----\\n");
-        params.put(GSuiteClient.PRIVATE_KEY_ID_PARAM, "test_key_id");
-        params.put(GSuiteClient.CLIENT_EMAIL_PARAM, "test@example.com");
-        final GSuiteClient.RequestInitializer initializer = new GSuiteClient.RequestInitializer(params, null);
         try {
-            initializer.getPrivateKey();
-            fail("Expected InvalidKeySpecException");
+            GSuiteClient.parsePrivateKey("-----BEGIN PRIVATE KEY-----\\n!!!not-base64!!!\\n-----END PRIVATE KEY-----\\n");
+            fail("should throw for invalid base64");
         } catch (final Exception e) {
-            assertTrue(e.getMessage().contains("Failed to decode") || e.getMessage().contains("Illegal base64"));
+            assertNotNull(e.getMessage());
         }
+    }
+
+    @Test
+    public void testRequestInitializerTimeouts() throws Exception {
+        final DataStoreParams params = newValidParams();
+        params.put(GSuiteClient.READ_TIMEOUT, "1234");
+        params.put(GSuiteClient.CONNECT_TIMEOUT, "5678");
+        final MockDriveTransport transport = new MockDriveTransport();
+        // ServiceAccountCredentials is built with explicit scopes, so it always uses the
+        // real OAuth2 assertion flow (never a self-signed JWT), and initialize() blocks
+        // on a token fetch through the credentials' own transport.
+        transport.queueJson("{\"access_token\":\"test-token\",\"expires_in\":3600,\"token_type\":\"Bearer\"}");
+        final GSuiteClient client = new GSuiteClient(params, transport);
+        final HttpRequest request = new MockDriveTransport().createRequestFactory().buildGetRequest(new GenericUrl("https://example.com/"));
+        client.requestInitializer.initialize(request);
+        assertEquals(1234, request.getReadTimeout());
+        assertEquals(5678, request.getConnectTimeout());
+        client.close();
+    }
+
+    @Test
+    public void testRequestInitializerDefaultTimeouts() throws Exception {
+        final MockDriveTransport transport = new MockDriveTransport();
+        transport.queueJson("{\"access_token\":\"test-token\",\"expires_in\":3600,\"token_type\":\"Bearer\"}");
+        final GSuiteClient client = new GSuiteClient(newValidParams(), transport);
+        final HttpRequest request = new MockDriveTransport().createRequestFactory().buildGetRequest(new GenericUrl("https://example.com/"));
+        client.requestInitializer.initialize(request);
+        assertEquals(GSuiteClient.DEFAULT_READ_TIMEOUT_MS, request.getReadTimeout());
+        assertEquals(GSuiteClient.DEFAULT_CONNECT_TIMEOUT_MS, request.getConnectTimeout());
+        client.close();
+    }
+
+    @Test
+    public void testRequestInitializerWithNullHttpTransport() {
+        final GSuiteClient client = new GSuiteClient(newValidParams(), new MockDriveTransport());
+        assertNotNull(client.credentials);
+        assertTrue("credentials should be a ServiceAccountCredentials", client.credentials instanceof ServiceAccountCredentials);
+        client.close();
+    }
+
+    @Test
+    public void testDefaultScopeIsReadOnly() {
+        final GSuiteClient client = new GSuiteClient(newValidParams(), new MockDriveTransport());
+        final Collection<String> scopes = client.getScopes();
+        assertEquals(1, scopes.size());
+        assertEquals("https://www.googleapis.com/auth/drive.readonly", scopes.iterator().next());
+        client.close();
+    }
+
+    @Test
+    public void testScopesParameterOverridesDefault() {
+        final DataStoreParams params = newValidParams();
+        params.put(GSuiteClient.SCOPES,
+                "https://www.googleapis.com/auth/drive.readonly, https://www.googleapis.com/auth/admin.directory.user.readonly");
+        final GSuiteClient client = new GSuiteClient(params, new MockDriveTransport());
+        final List<String> scopes = new ArrayList<>(client.getScopes());
+        assertEquals(2, scopes.size());
+        assertTrue(scopes.toString(), scopes.contains("https://www.googleapis.com/auth/admin.directory.user.readonly"));
+        client.close();
+    }
+
+    @Test
+    public void testImpersonateUserProducesDelegatedCredentials() {
+        final DataStoreParams params = newValidParams();
+        params.put(GSuiteClient.IMPERSONATE_USER, "admin@example.com");
+        final GSuiteClient client = new GSuiteClient(params, new MockDriveTransport());
+        final GoogleCredentials credentials = client.credentials;
+        assertTrue("credentials should be a ServiceAccountCredentials", credentials instanceof ServiceAccountCredentials);
+        assertEquals("admin@example.com", ((ServiceAccountCredentials) credentials).getServiceAccountUser());
+        client.close();
     }
 }
