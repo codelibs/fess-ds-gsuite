@@ -247,4 +247,25 @@ public class GSuiteClientTest extends UnitDsTestCase {
         assertEquals("admin@example.com", ((ServiceAccountCredentials) credentials).getServiceAccountUser());
         client.close();
     }
+
+    /**
+     * Tests that getFiles sends the current shared-drive parameters,
+     * not the deprecated Team Drive API ones.
+     */
+    @Test
+    public void testGetFilesSendsModernSharedDriveParameters() {
+        final MockDriveTransport transport = new MockDriveTransport();
+        transport.queueJson("{\"access_token\":\"test-token\",\"expires_in\":3600,\"token_type\":\"Bearer\"}");
+        transport.queueJson("{\"files\":[{\"id\":\"F1\",\"name\":\"a.txt\"}]}");
+        final GSuiteClient client = new GSuiteClient(newValidParams(), transport);
+        final List<String> ids = new ArrayList<>();
+        client.getFiles(null, GSuiteClient.ALL_DRIVES, null, "*", file -> ids.add(file.getId()));
+        assertEquals(1, ids.size());
+        final String url = transport.getRequestedUrls().get(1);
+        assertTrue(url, url.contains("includeItemsFromAllDrives=true"));
+        assertTrue(url, url.contains("supportsAllDrives=true"));
+        assertFalse(url, url.contains("includeTeamDriveItems"));
+        assertFalse(url, url.contains("supportsTeamDrives"));
+        client.close();
+    }
 }
