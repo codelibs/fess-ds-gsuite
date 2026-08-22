@@ -204,6 +204,40 @@ public class GSuiteClientTest extends UnitDsTestCase {
     }
 
     @Test
+    public void testEmptyScopesParameterFallsBackToDefault() {
+        final DataStoreParams params = newValidParams();
+        params.put(GSuiteClient.SCOPES, "");
+        final GSuiteClient client = new GSuiteClient(params, new MockDriveTransport());
+        final Collection<String> scopes = client.getScopes();
+        assertEquals(1, scopes.size());
+        assertEquals("https://www.googleapis.com/auth/drive.readonly", scopes.iterator().next());
+        client.close();
+    }
+
+    @Test
+    public void testBlankScopesParameterFallsBackToDefault() {
+        final DataStoreParams params = newValidParams();
+        params.put(GSuiteClient.SCOPES, "  ");
+        final GSuiteClient client = new GSuiteClient(params, new MockDriveTransport());
+        final Collection<String> scopes = client.getScopes();
+        assertEquals(1, scopes.size());
+        assertEquals("https://www.googleapis.com/auth/drive.readonly", scopes.iterator().next());
+        client.close();
+    }
+
+    @Test
+    public void testScopesParameterWithNoUsableScopeThrows() {
+        final DataStoreParams params = newValidParams();
+        params.put(GSuiteClient.SCOPES, ",");
+        try {
+            new GSuiteClient(params, new MockDriveTransport());
+            fail("Expected DataStoreException");
+        } catch (final DataStoreException e) {
+            assertTrue(e.getMessage().contains("scopes"));
+        }
+    }
+
+    @Test
     public void testImpersonateUserProducesDelegatedCredentials() {
         final DataStoreParams params = newValidParams();
         params.put(GSuiteClient.IMPERSONATE_USER, "admin@example.com");

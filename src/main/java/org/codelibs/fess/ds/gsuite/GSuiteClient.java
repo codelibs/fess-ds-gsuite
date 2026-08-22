@@ -195,14 +195,22 @@ public class GSuiteClient implements AutoCloseable {
 
     /**
      * Returns the OAuth scopes.
+     * A blank (absent, empty, or whitespace-only) {@link #SCOPES} parameter falls back to
+     * {@link #DEFAULT_SCOPES}. If the parameter is present and non-blank but, after splitting on
+     * commas, trimming, and dropping blank entries, yields no usable scope (e.g. {@code ","}),
+     * a {@link DataStoreException} is thrown instead of silently returning an empty collection.
      *
      * @return The OAuth scopes.
      */
     protected Collection<String> getScopes() {
-        return Arrays.stream(params.getAsString(SCOPES, DEFAULT_SCOPES).split(","))
-                .map(String::trim)
-                .filter(StringUtil::isNotBlank)
-                .collect(Collectors.toList());
+        final String rawScopes = params.getAsString(SCOPES);
+        final String scopesValue = StringUtil.isBlank(rawScopes) ? DEFAULT_SCOPES : rawScopes;
+        final Collection<String> scopes =
+                Arrays.stream(scopesValue.split(",")).map(String::trim).filter(StringUtil::isNotBlank).collect(Collectors.toList());
+        if (scopes.isEmpty()) {
+            throw new DataStoreException("parameter '" + SCOPES + "' must specify at least one scope");
+        }
+        return scopes;
     }
 
     /**
