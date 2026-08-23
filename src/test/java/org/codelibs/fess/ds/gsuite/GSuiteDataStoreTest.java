@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.gsuite.UnitDsTestCase;
 
@@ -284,4 +285,60 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     // Note: buildFileMap() tests are omitted as they require integration test environment
     // with ComponentUtil dependencies (FileTypeHelper) which are not available in unit tests.
     // The functionality is covered by integration tests.
+
+    /**
+     * Registers a SystemHelper whose search-role prefixes are fixed, so the assertions do not
+     * depend on a FessConfig being available in the unit-test container. The prefixes returned
+     * here state the real contract explicitly: {@code SystemHelper#getSearchRoleByUser}/
+     * {@code getSearchRoleByGroup}/{@code getSearchRoleByRole} return PREFIX-form roles built by
+     * {@code SystemHelper#buildSearchRole(type, name)} as {@code type + name} (e.g.
+     * {@code "1alice@example.com"}), using the {@code fess_config.properties} defaults
+     * {@code role.search.user.prefix=1}, {@code role.search.group.prefix=2},
+     * {@code role.search.role.prefix=R}. The {@code {user}}/{@code {group}}/{@code {role}}
+     * bracket notation is only the INPUT syntax {@code PermissionHelper#encode()} accepts; it is
+     * never what these methods return, so this stub does not use it.
+     */
+    private void registerStubSystemHelper() {
+        ComponentUtil.register(new SystemHelper() {
+            @Override
+            public String getSearchRoleByUser(final String name) {
+                return "1" + name;
+            }
+
+            @Override
+            public String getSearchRoleByGroup(final String name) {
+                return "2" + name;
+            }
+
+            @Override
+            public String getSearchRoleByRole(final String name) {
+                return "R" + name;
+            }
+        }, "systemHelper");
+    }
+
+    @Test
+    public void test_getPermission_anyoneIsGuestRole() {
+        registerStubSystemHelper();
+        assertEquals("Rguest", dataStore.getPermission("anyone", "anyone"));
+    }
+
+    @Test
+    public void test_getPermission_anyoneWithoutEmailAddress() {
+        registerStubSystemHelper();
+        // A type=anyone Permission carries no emailAddress, so the null value must not short-circuit.
+        assertEquals("Rguest", dataStore.getPermission("anyone", null));
+    }
+
+    @Test
+    public void test_getPermission_userIsStillUserRole() {
+        registerStubSystemHelper();
+        assertEquals("1alice@example.com", dataStore.getPermission("user", "alice@example.com"));
+    }
+
+    @Test
+    public void test_getPermission_groupIsStillGroupRole() {
+        registerStubSystemHelper();
+        assertEquals("2team@example.com", dataStore.getPermission("group", "team@example.com"));
+    }
 }

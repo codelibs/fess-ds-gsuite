@@ -686,11 +686,20 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Returns the permission for a type and value.
+     * <p>
+     * A {@code type=anyone} permission carries no value at all, so it is resolved before the
+     * null check. Fess identifies the anonymous user with the guest <em>role</em>
+     * ({@code role.search.guest.permissions} defaults to <code>{role}guest</code>), not with a
+     * user named "guest".
+     * </p>
      * @param type The type.
      * @param value The value.
      * @return The permission for the type and value.
      */
     protected String getPermission(final String type, final String value) {
+        if ("anyone".equals(type)) {
+            return ComponentUtil.getSystemHelper().getSearchRoleByRole("guest");
+        }
         if (value == null) {
             return null;
         }
@@ -699,9 +708,6 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
         if ("group".equals(type) || "domain".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
-        }
-        if ("anyone".equals(type)) {
-            return ComponentUtil.getSystemHelper().getSearchRoleByUser("guest");
         }
         return null;
     }
