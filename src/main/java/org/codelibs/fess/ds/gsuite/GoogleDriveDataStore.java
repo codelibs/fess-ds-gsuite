@@ -93,6 +93,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
     /** Parameter key for the number of threads. */
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
+    /** Parameter key for the thread pool termination timeout in seconds. */
+    protected static final String THREAD_POOL_TIMEOUT_SECONDS = "thread_pool_timeout_seconds";
     /**
      * Parameter key for the role format applied to a domain-wide permission. The value is
      * {@code {domain}}-substituted and then passed through
@@ -307,6 +309,20 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Returns how long to wait for the crawler thread pool to drain, in seconds.
+     * @param paramMap The parameters for the data store.
+     * @return The timeout in seconds.
+     */
+    protected long getThreadPoolTimeoutSeconds(final DataStoreParams paramMap) {
+        final String value = paramMap.getAsString(THREAD_POOL_TIMEOUT_SECONDS);
+        try {
+            return StringUtil.isNotBlank(value) ? Long.parseLong(value) : DEFAULT_THREAD_POOL_TIMEOUT_SECONDS;
+        } catch (final NumberFormatException e) {
+            return DEFAULT_THREAD_POOL_TIMEOUT_SECONDS;
+        }
+    }
+
+    /**
      * Returns the URL filter.
      * @param paramMap The parameters for the data store.
      * @return The URL filter.
@@ -371,6 +387,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
         try {
             client.getFiles(query, corpora, spaces, fields, file -> {
+                if (!alive) {
+                    // The admin UI asked this data store to stop; do not queue any more work.
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Crawling is stopped. Skipping {}.", file.getId());
+                    }
+                    return;
+                }
                 executorService
                         .execute(() -> processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file));
 
@@ -379,7 +402,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 logger.debug("Shutting down thread executor.");
             }
             executorService.shutdown();
-            executorService.awaitTermination(DEFAULT_THREAD_POOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            executorService.awaitTermination(getThreadPoolTimeoutSeconds(paramMap), TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
             throw new InterruptedRuntimeException(e);
         } finally {
@@ -575,6 +598,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final File file) {
+        if (!alive) {
+            // Work already queued when the stop request arrived must be dropped, not indexed.
+            if (logger.isDebugEnabled()) {
+                logger.debug("Crawling is stopped. Skipping {}.", file.getId());
+            }
+            return;
+        }
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         if (logger.isDebugEnabled()) {
             logger.debug("file: {}", file);
