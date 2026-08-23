@@ -768,23 +768,30 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Returns the URL for a file.
+     * <p>
+     * {@code webViewLink} opens the file in a browser, which is what a search result must link to.
+     * {@code webContentLink} is a direct-download link and is not usable for every mime type, so it
+     * is no longer the default. When the file has no {@code webViewLink}, the canonical
+     * {@code https://drive.google.com/open?id=<id>} form is used instead.
+     * </p>
      * @param configMap The configuration map.
      * @param paramMap The parameters for the data store.
      * @param file The file.
-     * @return The URL for the file.
+     * @return The URL for the file, or null when neither a web view link nor an ID is available.
      */
     protected String getUrl(final Map<String, Object> configMap, final DataStoreParams paramMap, final File file) {
-        final String url = file.getWebContentLink();
-        if (StringUtil.isBlank(url)) {
-            final String id = file.getId();
-            if (StringUtil.isNotBlank(id)) {
-                return "https://drive.google.com/uc?id=" + id + "&export=download";
-            }
-            if (logger.isDebugEnabled()) {
-                logger.debug("id is null.");
-            }
+        final String webViewLink = file.getWebViewLink();
+        if (StringUtil.isNotBlank(webViewLink)) {
+            return webViewLink;
         }
-        return url;
+        final String id = file.getId();
+        if (StringUtil.isNotBlank(id)) {
+            return "https://drive.google.com/open?id=" + id;
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("id is null.");
+        }
+        return null;
     }
 
     /**

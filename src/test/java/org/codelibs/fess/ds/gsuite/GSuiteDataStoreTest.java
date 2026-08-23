@@ -189,26 +189,38 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
-    public void testGetUrl_WithWebContentLink() {
+    public void testGetUrl_WithWebViewLink() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
-        file.setWebContentLink("https://drive.google.com/file/d/abc123/view");
+        file.setWebViewLink("https://drive.google.com/file/d/abc123/view?usp=drivesdk");
+        file.setWebContentLink("https://drive.google.com/uc?id=abc123&export=download");
         file.setId("abc123");
         final String url = dataStore.getUrl(null, params, file);
-        assertEquals("https://drive.google.com/file/d/abc123/view", url);
+        assertEquals("https://drive.google.com/file/d/abc123/view?usp=drivesdk", url);
     }
 
     @Test
-    public void testGetUrl_WithoutWebContentLink() {
+    public void testGetUrl_WithoutWebViewLink() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
+        file.setWebContentLink("https://drive.google.com/uc?id=abc123&export=download");
         file.setId("abc123");
         final String url = dataStore.getUrl(null, params, file);
-        assertEquals("https://drive.google.com/uc?id=abc123&export=download", url);
+        assertEquals("https://drive.google.com/open?id=abc123", url);
     }
 
     @Test
-    public void testGetUrl_WithoutWebContentLinkAndId() {
+    public void testGetUrl_WithBlankWebViewLink() {
+        final DataStoreParams params = new DataStoreParams();
+        final File file = new File();
+        file.setWebViewLink("   ");
+        file.setId("abc123");
+        final String url = dataStore.getUrl(null, params, file);
+        assertEquals("https://drive.google.com/open?id=abc123", url);
+    }
+
+    @Test
+    public void testGetUrl_WithoutWebViewLinkAndId() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
         final String url = dataStore.getUrl(null, params, file);
