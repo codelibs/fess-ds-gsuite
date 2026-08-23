@@ -110,6 +110,15 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      */
     protected static final String DEFAULT_DOMAIN_PERMISSION_FORMAT = "{group}{domain}";
 
+    /**
+     * Parameter keys that carry service account credentials and must never reach the script
+     * evaluation context, since a script value can be indexed and read back by anyone with search
+     * access. This is the single place to add a key if a later phase introduces another secret
+     * parameter.
+     */
+    protected static final String[] SECRET_PARAM_KEYS =
+            { GSuiteClient.PRIVATE_KEY_PARAM, GSuiteClient.PRIVATE_KEY_ID_PARAM, GSuiteClient.CLIENT_EMAIL_PARAM };
+
     // scripts
     /** Script key for the file object. */
     protected static final String FILE = "file";
@@ -587,7 +596,12 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
 
+            // The script context is evaluated with arbitrary user-supplied expressions and its values
+            // can be indexed, so the service account credentials must never reach it.
             final Map<String, Object> resultMap = new LinkedHashMap<>(localParamMap.asMap());
+            for (final String secretKey : SECRET_PARAM_KEYS) {
+                resultMap.remove(secretKey);
+            }
 
             // Extract file content
             final String content = getFileContents(client, file, ignoreError);
