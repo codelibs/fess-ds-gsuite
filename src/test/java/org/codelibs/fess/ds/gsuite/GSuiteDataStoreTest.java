@@ -183,7 +183,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         permission.setType("user");
         permission.setEmailAddress("user@example.com");
         permission.setDeleted(true);
-        final String result = dataStore.getPermission(permission);
+        final String result = dataStore.getPermission(new DataStoreParams(), permission);
         assertNull(result);
     }
 
@@ -217,7 +217,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     @Test
     public void testGetFilePermissions_WithNullPermissionsAndOwners() {
         final File file = new File();
-        final List<String> permissions = dataStore.getFilePermissions(null, file);
+        final List<String> permissions = dataStore.getFilePermissions(null, new DataStoreParams(), file);
         assertNotNull(permissions);
         assertEquals(0, permissions.size());
     }
@@ -340,5 +340,70 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     public void test_getPermission_groupIsStillGroupRole() {
         registerStubSystemHelper();
         assertEquals("2team@example.com", dataStore.getPermission("group", "team@example.com"));
+    }
+
+    @Test
+    public void test_getPermission_domainUsesDomainField() {
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        assertEquals("{group}example.com", dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getPermission_domainWithCustomFormat() {
+        final DataStoreParams params = new DataStoreParams();
+        params.put("domain_permission_format", "{role}drive-{domain}");
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        assertEquals("{role}drive-example.com", dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getPermission_domainWithoutDomainValueIsSkipped() {
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setEmailAddress("someone@example.com");
+        assertNull(dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getPermission_deletedDomainPermissionIsSkipped() {
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        permission.setDeleted(true);
+        assertNull(dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getFilePermissions_includesDomainPermission() {
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        final File file = new File();
+        file.setPermissions(java.util.Collections.singletonList(permission));
+        final List<String> roles = dataStore.getFilePermissions(null, params, file);
+        assertEquals(1, roles.size());
+        assertEquals("{group}example.com", roles.get(0));
+    }
+
+    @Test
+    public void test_getDomainPermission_blankDomain() {
+        final DataStoreParams params = new DataStoreParams();
+        assertNull(dataStore.getDomainPermission(params, null));
+        assertNull(dataStore.getDomainPermission(params, ""));
+        assertNull(dataStore.getDomainPermission(params, "   "));
+    }
+
+    @Test
+    public void test_domainPermissionFormatConstants() {
+        assertEquals("domain_permission_format", GoogleDriveDataStore.DOMAIN_PERMISSION_FORMAT);
+        assertEquals("{group}{domain}", GoogleDriveDataStore.DEFAULT_DOMAIN_PERMISSION_FORMAT);
     }
 }

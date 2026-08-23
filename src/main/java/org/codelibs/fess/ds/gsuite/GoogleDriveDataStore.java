@@ -93,6 +93,11 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
     /** Parameter key for the number of threads. */
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
+    /** Parameter key for the role format applied to a domain-wide permission. */
+    protected static final String DOMAIN_PERMISSION_FORMAT = "domain_permission_format";
+
+    /** Default role format for a domain-wide permission. {@code {domain}} is replaced with the domain name. */
+    protected static final String DEFAULT_DOMAIN_PERMISSION_FORMAT = "{group}{domain}";
 
     // scripts
     /** Script key for the file object. */
@@ -587,7 +592,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             // Build file metadata map
             final Map<String, Object> fileMap = buildFileMap(file, content, size, url);
 
-            final List<String> permissions = getFilePermissions(client, file);
+            final List<String> permissions = getFilePermissions(client, paramMap, file);
             final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
             StreamUtil.split(paramMap.getAsString(DEFAULT_PERMISSIONS), ",")
                     .of(stream -> stream.filter(StringUtil::isNotBlank).map(permissionHelper::encode).forEach(permissions::add));
@@ -643,13 +648,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     /**
      * Returns the permissions for a file.
      * @param client The GSuiteClient.
+     * @param paramMap The parameters for the data store.
      * @param file The file.
      * @return The permissions for the file.
      */
-    protected List<String> getFilePermissions(final GSuiteClient client, final File file) {
+    protected List<String> getFilePermissions(final GSuiteClient client, final DataStoreParams paramMap, final File file) {
         final List<String> permissionList = new ArrayList<>();
         if (file.getPermissions() != null) {
-            file.getPermissions().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
+            file.getPermissions().stream().map(p -> getPermission(paramMap, p)).filter(s -> s != null).forEach(permissionList::add);
         }
         if (file.getOwners() != null) {
             file.getOwners().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
@@ -671,17 +677,41 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Returns the permission for a permission.
+     * <p>
+     * A {@code type=domain} permission carries its value in {@link Permission#getDomain()};
+     * {@link Permission#getEmailAddress()} is null for it, so it must not go through the
+     * email-address based path.
+     * </p>
+     * @param paramMap The parameters for the data store.
      * @param permission The permission.
      * @return The permission for the permission.
      */
-    protected String getPermission(final Permission permission) {
+    protected String getPermission(final DataStoreParams paramMap, final Permission permission) {
         if (logger.isDebugEnabled()) {
             logger.debug("permission: {}", permission);
         }
         if (Boolean.TRUE.equals(permission.getDeleted())) {
             return null;
         }
+        if ("domain".equals(permission.getType())) {
+            return getDomainPermission(paramMap, permission.getDomain());
+        }
         return getPermission(permission.getType(), permission.getEmailAddress());
+    }
+
+    /**
+     * Returns the role for a domain-wide permission.
+     * The format comes from the {@code domain_permission_format} parameter and
+     * {@code {domain}} in it is replaced with the domain name.
+     * @param paramMap The parameters for the data store.
+     * @param domain The domain name carried by the permission.
+     * @return The role, or null if the domain name is blank.
+     */
+    protected String getDomainPermission(final DataStoreParams paramMap, final String domain) {
+        if (StringUtil.isBlank(domain)) {
+            return null;
+        }
+        return paramMap.getAsString(DOMAIN_PERMISSION_FORMAT, DEFAULT_DOMAIN_PERMISSION_FORMAT).replace("{domain}", domain);
     }
 
     /**
@@ -690,7 +720,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * A {@code type=anyone} permission carries no value at all, so it is resolved before the
      * null check. Fess identifies the anonymous user with the guest <em>role</em>
      * ({@code role.search.guest.permissions} defaults to <code>{role}guest</code>), not with a
-     * user named "guest".
+     * user named "guest". {@code type=domain} is not handled here because its value lives in
+     * {@link Permission#getDomain()}.
      * </p>
      * @param type The type.
      * @param value The value.
@@ -706,7 +737,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         if ("user".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByUser(value);
         }
-        if ("group".equals(type) || "domain".equals(type)) {
+        if ("group".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
         }
         return null;
