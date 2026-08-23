@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.helper.PermissionHelper;
 import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.gsuite.UnitDsTestCase;
@@ -317,6 +318,40 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         }, "systemHelper");
     }
 
+    /**
+     * Registers a PermissionHelper whose encode() mimics the real contract without needing a
+     * FessConfig in the unit-test container. In production, {@code encode} treats
+     * {@code {user}}/{@code {group}}/{@code {role}} as INPUT notation and resolves the remainder
+     * through {@code SystemHelper#getSearchRoleByUser}/{@code getSearchRoleByGroup}/
+     * {@code getSearchRoleByRole}; this stub maps those same three prefixes to the same
+     * PREFIX-form roles as {@link #registerStubSystemHelper()} ("1"/"2"/"R" + name), and returns
+     * null - never a bogus role - when a recognized prefix has nothing usable following it, or
+     * the input is blank, matching {@code PermissionHelper#encode}'s own contract.
+     */
+    private void registerStubPermissionHelper() {
+        ComponentUtil.register(new PermissionHelper() {
+            @Override
+            public String encode(final String value) {
+                if (value == null || value.isEmpty()) {
+                    return null;
+                }
+                if (value.startsWith("{user}")) {
+                    final String name = value.substring("{user}".length());
+                    return name.isEmpty() ? null : "1" + name;
+                }
+                if (value.startsWith("{group}")) {
+                    final String name = value.substring("{group}".length());
+                    return name.isEmpty() ? null : "2" + name;
+                }
+                if (value.startsWith("{role}")) {
+                    final String name = value.substring("{role}".length());
+                    return name.isEmpty() ? null : "R" + name;
+                }
+                return value;
+            }
+        }, "permissionHelper");
+    }
+
     @Test
     public void test_getPermission_anyoneIsGuestRole() {
         registerStubSystemHelper();
@@ -344,21 +379,27 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
 
     @Test
     public void test_getPermission_domainUsesDomainField() {
+        registerStubPermissionHelper();
         final DataStoreParams params = new DataStoreParams();
         final Permission permission = new Permission();
         permission.setType("domain");
         permission.setDomain("example.com");
-        assertEquals("{group}example.com", dataStore.getPermission(params, permission));
+        // Default format "{group}{domain}" substitutes to "{group}example.com", which is then
+        // encoded (PermissionHelper#encode) into the group PREFIX-form role, not left literal.
+        assertEquals("2example.com", dataStore.getPermission(params, permission));
     }
 
     @Test
     public void test_getPermission_domainWithCustomFormat() {
+        registerStubPermissionHelper();
         final DataStoreParams params = new DataStoreParams();
         params.put("domain_permission_format", "{role}drive-{domain}");
         final Permission permission = new Permission();
         permission.setType("domain");
         permission.setDomain("example.com");
-        assertEquals("{role}drive-example.com", dataStore.getPermission(params, permission));
+        // A {role}-typed format is encoded into the role PREFIX-form too, proving encode() is
+        // applied regardless of which of the three notations the format uses.
+        assertEquals("Rdrive-example.com", dataStore.getPermission(params, permission));
     }
 
     @Test
@@ -382,6 +423,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
 
     @Test
     public void test_getFilePermissions_includesDomainPermission() {
+        registerStubPermissionHelper();
         final DataStoreParams params = new DataStoreParams();
         final Permission permission = new Permission();
         permission.setType("domain");
@@ -390,7 +432,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         file.setPermissions(java.util.Collections.singletonList(permission));
         final List<String> roles = dataStore.getFilePermissions(null, params, file);
         assertEquals(1, roles.size());
-        assertEquals("{group}example.com", roles.get(0));
+        assertEquals("2example.com", roles.get(0));
     }
 
     @Test
@@ -399,6 +441,17 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertNull(dataStore.getDomainPermission(params, null));
         assertNull(dataStore.getDomainPermission(params, ""));
         assertNull(dataStore.getDomainPermission(params, "   "));
+    }
+
+    @Test
+    public void test_getDomainPermission_formatYieldingNothingUsableIsNull() {
+        registerStubPermissionHelper();
+        final DataStoreParams params = new DataStoreParams();
+        // No "{domain}" token in the format, so the domain name never gets embedded and the
+        // substituted value is the bare "{group}" prefix with nothing following it - encode()
+        // cannot turn that into a role, so the method must return null, not a bogus string.
+        params.put("domain_permission_format", "{group}");
+        assertNull(dataStore.getDomainPermission(params, "example.com"));
     }
 
     @Test

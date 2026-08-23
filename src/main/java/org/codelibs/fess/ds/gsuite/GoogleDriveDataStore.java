@@ -93,10 +93,21 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
     /** Parameter key for the number of threads. */
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
-    /** Parameter key for the role format applied to a domain-wide permission. */
+    /**
+     * Parameter key for the role format applied to a domain-wide permission. The value is
+     * {@code {domain}}-substituted and then passed through
+     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, so it accepts the same
+     * {@code {user}}/{@code {group}}/{@code {role}} input notation as {@link #DEFAULT_PERMISSIONS}.
+     */
     protected static final String DOMAIN_PERMISSION_FORMAT = "domain_permission_format";
 
-    /** Default role format for a domain-wide permission. {@code {domain}} is replaced with the domain name. */
+    /**
+     * Default role format for a domain-wide permission. {@code {domain}} is replaced with the
+     * domain name and the result is encoded via
+     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, so {@code {group}} here
+     * is the same INPUT notation {@code encode} accepts for {@link #DEFAULT_PERMISSIONS}, not a
+     * literal string that reaches the index.
+     */
     protected static final String DEFAULT_DOMAIN_PERMISSION_FORMAT = "{group}{domain}";
 
     // scripts
@@ -701,17 +712,29 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Returns the role for a domain-wide permission.
-     * The format comes from the {@code domain_permission_format} parameter and
-     * {@code {domain}} in it is replaced with the domain name.
+     * <p>
+     * The format comes from the {@code domain_permission_format} parameter, {@code {domain}} in
+     * it is replaced with the domain name, and the result is passed through
+     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, exactly like
+     * {@link #DEFAULT_PERMISSIONS} values are encoded in {@code processFile}. The
+     * {@code {user}}/{@code {group}}/{@code {role}} tokens in the format are therefore the same
+     * INPUT notation {@code encode} accepts, not a literal string that reaches the index.
+     * </p>
      * @param paramMap The parameters for the data store.
      * @param domain The domain name carried by the permission.
-     * @return The role, or null if the domain name is blank.
+     * @return The role, or null if the domain name is blank or the format does not encode to a usable role.
      */
     protected String getDomainPermission(final DataStoreParams paramMap, final String domain) {
         if (StringUtil.isBlank(domain)) {
             return null;
         }
-        return paramMap.getAsString(DOMAIN_PERMISSION_FORMAT, DEFAULT_DOMAIN_PERMISSION_FORMAT).replace("{domain}", domain);
+        final String formatted =
+                paramMap.getAsString(DOMAIN_PERMISSION_FORMAT, DEFAULT_DOMAIN_PERMISSION_FORMAT).replace("{domain}", domain);
+        final String encoded = ComponentUtil.getPermissionHelper().encode(formatted);
+        if (StringUtil.isBlank(encoded)) {
+            return null;
+        }
+        return encoded;
     }
 
     /**
