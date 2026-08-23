@@ -603,21 +603,29 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 resultMap.remove(secretKey);
             }
 
+            // Check the size Drive reports before spending a download and a Tika extraction on it
+            final long maxSize = ((Long) configMap.get(MAX_SIZE)).longValue();
+            final Long declaredSize = file.getSize();
+            if (declaredSize != null && declaredSize.longValue() > maxSize) {
+                throw new MaxLengthExceededException(
+                        "The content length (" + declaredSize + " byte) is over " + maxSize + " byte. The url is " + url);
+            }
+
             // Extract file content
             final String content = getFileContents(client, file, ignoreError);
             final long size;
-            if (file.getSize() != null) {
-                size = file.getSize();
+            if (declaredSize != null) {
+                size = declaredSize.longValue();
             } else if (content != null) {
                 size = content.length();
             } else {
                 size = 0;
             }
 
-            // Check file size
-            if (size > ((Long) configMap.get(MAX_SIZE)).longValue()) {
+            // Google native formats report no size, so they can only be checked after extraction
+            if (declaredSize == null && size > maxSize) {
                 throw new MaxLengthExceededException(
-                        "The content length (" + size + " byte) is over " + configMap.get(MAX_SIZE) + " byte. The url is " + url);
+                        "The content length (" + size + " byte) is over " + maxSize + " byte. The url is " + url);
             }
 
             // Build file metadata map
