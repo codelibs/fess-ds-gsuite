@@ -549,10 +549,15 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Processes a file.
+     * <p>
+     * The stats key and everything derived from it go on a per-call copy of {@code paramMap};
+     * this method runs on the crawler thread pool and the caller's instance is shared by every
+     * thread, so writing to it races when {@code number_of_threads} is greater than 1.
+     * </p>
      * @param dataConfig The data configuration.
      * @param callback The callback to index the file.
      * @param configMap The configuration map.
-     * @param paramMap The parameters for the data store.
+     * @param paramMap The parameters for the data store. Treated as read-only.
      * @param scriptMap The script map.
      * @param defaultDataMap The default data map.
      * @param client The GSuiteClient.
@@ -566,22 +571,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             logger.debug("file: {}", file);
         }
         final StatsKeyObject statsKey = new StatsKeyObject(file.getId());
-        paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
+        final DataStoreParams localParamMap = paramMap.newInstance();
+        localParamMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
             crawlerStatsHelper.begin(statsKey);
 
             // Check if file should be processed (folder filtering, MIME type, URL filter)
-            if (!shouldProcessFile(file, configMap, paramMap, statsKey, crawlerStatsHelper)) {
+            if (!shouldProcessFile(file, configMap, localParamMap, statsKey, crawlerStatsHelper)) {
                 return;
             }
 
-            final String url = getUrl(configMap, paramMap, file);
+            final String url = getUrl(configMap, localParamMap, file);
             logger.info("Crawling URL: {}", url);
 
             final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
 
-            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
+            final Map<String, Object> resultMap = new LinkedHashMap<>(localParamMap.asMap());
 
             // Extract file content
             final String content = getFileContents(client, file, ignoreError);
@@ -603,9 +609,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             // Build file metadata map
             final Map<String, Object> fileMap = buildFileMap(file, content, size, url);
 
-            final List<String> permissions = getFilePermissions(client, paramMap, file);
+            final List<String> permissions = getFilePermissions(client, localParamMap, file);
             final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
-            StreamUtil.split(paramMap.getAsString(DEFAULT_PERMISSIONS), ",")
+            StreamUtil.split(localParamMap.getAsString(DEFAULT_PERMISSIONS), ",")
                     .of(stream -> stream.filter(StringUtil::isNotBlank).map(permissionHelper::encode).forEach(permissions::add));
             fileMap.put(FILE_ROLES, permissions);
 
@@ -617,7 +623,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 logger.debug("fileMap: {}", fileMap);
             }
 
-            final String scriptType = getScriptType(paramMap);
+            final String scriptType = getScriptType(localParamMap);
             for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
                 final Object convertValue = convertValue(scriptType, entry.getValue(), resultMap);
                 if (convertValue != null) {
@@ -635,10 +641,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 statsKey.setUrl(statsUrl);
             }
 
-            callback.store(paramMap, dataMap);
+            callback.store(localParamMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
         } catch (final Throwable t) {
-            handleProcessingError(dataConfig, file, configMap, paramMap, dataMap, statsKey, crawlerStatsHelper, t);
+            handleProcessingError(dataConfig, file, configMap, localParamMap, dataMap, statsKey, crawlerStatsHelper, t);
         } finally {
             crawlerStatsHelper.done(statsKey);
         }
