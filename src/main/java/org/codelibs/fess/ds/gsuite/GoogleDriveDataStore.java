@@ -150,13 +150,17 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String TARGET_BOTH = "both";
 
     /**
-     * Parameter keys that carry service account credentials and must never reach the script
-     * evaluation context, since a script value can be indexed and read back by anyone with search
-     * access. This is the single place to add a key if a later phase introduces another secret
-     * parameter.
+     * Parameter keys that carry credentials and must never reach the script evaluation context,
+     * since a script value can be indexed and read back by anyone with search access. This is the
+     * single place to add a key if a later phase introduces another secret parameter.
+     * <p>
+     * {@code proxy_username} is stripped alongside the password for the same reason
+     * {@code client_email} is: it is not a secret in itself, but it names an internal account and is
+     * half of a credential pair, which is not something a search result should disclose.
+     * </p>
      */
-    protected static final String[] SECRET_PARAM_KEYS =
-            { GSuiteClient.PRIVATE_KEY_PARAM, GSuiteClient.PRIVATE_KEY_ID_PARAM, GSuiteClient.CLIENT_EMAIL_PARAM };
+    protected static final String[] SECRET_PARAM_KEYS = { GSuiteClient.PRIVATE_KEY_PARAM, GSuiteClient.PRIVATE_KEY_ID_PARAM,
+            GSuiteClient.CLIENT_EMAIL_PARAM, GSuiteClient.PROXY_USERNAME, GSuiteClient.PROXY_PASSWORD };
 
     // scripts
     /** Script key for the file object. */

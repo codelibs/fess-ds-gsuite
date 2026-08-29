@@ -38,6 +38,9 @@ public class GoogleDriveDataStoreScriptContextTest extends UnitDsTestCase {
 
     private static final String PRIVATE_KEY_VALUE = "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBg-secret-\\n-----END PRIVATE KEY-----\\n";
 
+    /** A placeholder proxy password. Never a real credential. */
+    private static final String PROXY_PASSWORD_VALUE = "not-a-real-secret";
+
     @Override
     protected String prepareConfigFile() {
         return "test_app.xml";
@@ -142,6 +145,8 @@ public class GoogleDriveDataStoreScriptContextTest extends UnitDsTestCase {
         paramMap.put("private_key", PRIVATE_KEY_VALUE);
         paramMap.put("private_key_id", "key-id-0001");
         paramMap.put("client_email", "svc@project.iam.gserviceaccount.com");
+        paramMap.put("proxy_username", "proxy-user");
+        paramMap.put("proxy_password", PROXY_PASSWORD_VALUE);
         paramMap.put("max_size", "10000000");
         final Map<String, String> scriptMap = new HashMap<>();
         scriptMap.put("digest", "private_key");
@@ -154,9 +159,13 @@ public class GoogleDriveDataStoreScriptContextTest extends UnitDsTestCase {
         assertFalse(resultMap.containsKey("private_key"));
         assertFalse(resultMap.containsKey("private_key_id"));
         assertFalse(resultMap.containsKey("client_email"));
+        assertFalse(resultMap.containsKey("proxy_username"));
+        assertFalse(resultMap.containsKey("proxy_password"));
         assertFalse(resultMap.values().stream().anyMatch(v -> PRIVATE_KEY_VALUE.equals(v)));
         assertFalse(resultMap.values().stream().anyMatch(v -> "key-id-0001".equals(v)));
         assertFalse(resultMap.values().stream().anyMatch(v -> "svc@project.iam.gserviceaccount.com".equals(v)));
+        assertFalse(resultMap.values().stream().anyMatch(v -> PROXY_PASSWORD_VALUE.equals(v)));
+        assertFalse(resultMap.values().stream().anyMatch(v -> "proxy-user".equals(v)));
         // Non-secret parameters must survive, so the script context stays usable.
         assertEquals("10000000", resultMap.get("max_size"));
     }
@@ -229,5 +238,80 @@ public class GoogleDriveDataStoreScriptContextTest extends UnitDsTestCase {
         // The script's "private_key" expression must not resolve to the secret value: the key is
         // gone from the evaluation context entirely, so the lookup misses and nothing is indexed.
         assertNull(capturedDigest.get());
+    }
+
+    /**
+     * The proxy password is a credential of exactly the same kind as the service account key: a
+     * crawl script such as {@code digest=proxy_password} would otherwise write it into the search
+     * index, readable by anyone with search access.
+     */
+    @Test
+    public void test_processFile_scriptReferencingProxyPasswordResolvesToNull() {
+        registerHelpers();
+        final AtomicReference<Object> capturedDigest = new AtomicReference<>();
+        final AtomicReference<Throwable> capturedError = new AtomicReference<>();
+        final GoogleDriveDataStore dataStore = new GoogleDriveDataStore() {
+            @Override
+            protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
+                return "hello world";
+            }
+
+            @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // This test is not about the ACL: the file only needs a role so that the
+                // fail-closed rule does not skip it.
+                return Arrays.asList("1owner@example.com");
+            }
+
+            @Override
+            protected Object convertValue(final String scriptType, final String template, final Map<String, Object> resultMap) {
+                // Mirrors how the real script engine resolves a bare parameter-name expression:
+                // a direct key lookup against the evaluation context (resultMap).
+                return resultMap.get(template);
+            }
+
+            @Override
+            protected void handleProcessingError(final DataConfig dataConfig, final File file, final Map<String, Object> configMap,
+                    final DataStoreParams paramMap, final Map<String, Object> dataMap, final StatsKeyObject statsKey,
+                    final CrawlerStatsHelper crawlerStatsHelper, final Throwable t) {
+                capturedError.set(t);
+            }
+        };
+
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("private_key", PRIVATE_KEY_VALUE);
+        paramMap.put("private_key_id", "key-id-0001");
+        paramMap.put("client_email", "svc@project.iam.gserviceaccount.com");
+        paramMap.put("proxy_username", "proxy-user");
+        paramMap.put("proxy_password", PROXY_PASSWORD_VALUE);
+        final Map<String, String> scriptMap = new HashMap<>();
+        // A crawl script author trying to exfiltrate the proxy credentials.
+        scriptMap.put("digest", "proxy_password");
+
+        dataStore.processFile(null, new IndexUpdateCallback() {
+            @Override
+            public void store(final DataStoreParams p, final Map<String, Object> dataMap) {
+                capturedDigest.set(dataMap.get("digest"));
+            }
+
+            @Override
+            public long getDocumentSize() {
+                return 0;
+            }
+
+            @Override
+            public long getExecuteTime() {
+                return 0;
+            }
+
+            @Override
+            public void commit() {
+                // no-op
+            }
+        }, newConfigMap(), paramMap, scriptMap, new HashMap<>(), null, newFile());
+
+        assertNull(capturedError.get());
+        assertNull("the proxy password must be gone from the evaluation context entirely", capturedDigest.get());
     }
 }

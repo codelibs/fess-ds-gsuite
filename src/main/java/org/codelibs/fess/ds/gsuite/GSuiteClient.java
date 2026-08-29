@@ -21,6 +21,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
@@ -100,6 +101,12 @@ public class GSuiteClient implements AutoCloseable {
     protected static final String PROXY_PORT = "proxy_port";
     /** Parameter key for the proxy host. */
     protected static final String PROXY_HOST = "proxy_host";
+    /** Parameter key for the proxy user name. */
+    protected static final String PROXY_USERNAME = "proxy_username";
+    /** Parameter key for the proxy password. */
+    protected static final String PROXY_PASSWORD = "proxy_password";
+    /** The HTTP header that carries the proxy credentials. */
+    protected static final String PROXY_AUTHORIZATION_HEADER = "Proxy-Authorization";
     /** Parameter key for the refresh token interval. */
     protected static final String REFRESH_TOKEN_INTERVAL = "refresh_token_interval";
     /** Parameter key for the maximum cached content size. */
@@ -308,7 +315,9 @@ public class GSuiteClient implements AutoCloseable {
         retryInitialIntervalMillis = getIntParam(params, RETRY_INITIAL_INTERVAL_MS, DEFAULT_RETRY_INITIAL_INTERVAL_MS);
         maxBackOffMillis = getIntParam(params, MAX_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
         credentials = createCredentials();
-        requestInitializer = createRequestInitializer(credentials);
+        // Wrapped here rather than at each call site so that the Drive service and the Admin SDK
+        // request factory, which both reuse this initializer, authenticate against the same proxy.
+        requestInitializer = withProxyAuthorization(createRequestInitializer(credentials));
     }
 
     @Override
@@ -415,6 +424,56 @@ public class GSuiteClient implements AutoCloseable {
             adapter.initialize(request);
             request.setReadTimeout(readTimeout);
             request.setConnectTimeout(connectTimeout);
+        };
+    }
+
+    /**
+     * Builds the HTTP Basic value of the {@code Proxy-Authorization} header.
+     *
+     * @param username The proxy user name, or null.
+     * @param password The proxy password, or null.
+     * @return The header value, or null when no user name is configured.
+     */
+    protected static String buildProxyAuthorization(final String username, final String password) {
+        if (StringUtil.isBlank(username)) {
+            return null;
+        }
+        final String credential = username.trim() + ":" + (password == null ? StringUtil.EMPTY : password);
+        return "Basic " + Base64.getEncoder().encodeToString(credential.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Wraps a request initializer so that every outgoing request also carries the proxy credentials.
+     * <p>
+     * {@code NetHttpTransport.Builder#setProxy(Proxy)} accepts no credentials, and
+     * {@code java.net.Authenticator.setDefault} is a JVM wide side effect that a data store plugin
+     * must not impose on the rest of Fess, so the credentials travel as a request header instead.
+     * <p>
+     * <strong>Known limitation:</strong> a request header only authenticates a plain HTTP request.
+     * When HTTPS is tunnelled through an authenticating proxy the credentials are consumed by the
+     * {@code CONNECT} exchange, which the JDK drives through {@code java.net.Authenticator} rather
+     * than through a request header. Such an environment needs the JVM options
+     * {@code -Djdk.http.auth.tunneling.disabledSchemes=} and an {@code Authenticator} instead.
+     * <p>
+     * <strong>Logging:</strong> nothing here logs the header or the password. Note however that
+     * google-http-client writes request headers to its own {@code java.util.logging} channel once it
+     * is turned up to {@code CONFIG}, and it masks only {@code Authorization} and {@code Cookie}, so
+     * that wire log has to stay off wherever proxy credentials are configured.
+     * </p>
+     *
+     * @param delegate The initializer that installs the credentials and the timeouts, or null.
+     * @return The wrapped initializer, or {@code delegate} itself when no proxy user name is set.
+     */
+    protected HttpRequestInitializer withProxyAuthorization(final HttpRequestInitializer delegate) {
+        final String proxyAuthorization = buildProxyAuthorization(params.getAsString(PROXY_USERNAME), params.getAsString(PROXY_PASSWORD));
+        if (proxyAuthorization == null) {
+            return delegate;
+        }
+        return request -> {
+            if (delegate != null) {
+                delegate.initialize(request);
+            }
+            request.getHeaders().set(PROXY_AUTHORIZATION_HEADER, proxyAuthorization);
         };
     }
 
