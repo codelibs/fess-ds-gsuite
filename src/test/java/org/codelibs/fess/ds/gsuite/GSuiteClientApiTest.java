@@ -27,6 +27,7 @@ import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.Permission;
+import com.google.auth.oauth2.ServiceAccountCredentials;
 
 /**
  * API layer tests for {@link GSuiteClient} driven by {@link MockDriveTransport}.
@@ -309,6 +310,67 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
             final List<String> users = client.listUsers(null);
             assertEquals(1, users.size());
             assertEquals("a@example.com", users.get(0));
+        }
+    }
+
+    /**
+     * The clone must authenticate as the passed user and share only the transport. Nothing is
+     * queued on the transport, so any request the clone issued would fail the test.
+     */
+    @Test
+    public void test_forUser_sharesTransportAndImpersonatesThePassedUser() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport)) {
+            client.setApplicationName("fess-ds-gsuite-test");
+            final Drive callerDrive = client.getDrive();
+            final GSuiteClient userClient = client.forUser("u1@example.com");
+            assertNotSame(client, userClient);
+            assertSame(client.httpTransport, userClient.httpTransport);
+            assertNotSame(client.params, userClient.params);
+            assertEquals("u1@example.com", userClient.params.getAsString(GSuiteClient.IMPERSONATE_USER));
+            assertNull(client.params.getAsString(GSuiteClient.IMPERSONATE_USER));
+            assertNotSame(client.credentials, userClient.credentials);
+            assertEquals("u1@example.com", ((ServiceAccountCredentials) userClient.credentials).getServiceAccountUser());
+            assertNull(((ServiceAccountCredentials) client.credentials).getServiceAccountUser());
+            assertNotSame(client.requestInitializer, userClient.requestInitializer);
+            assertNotSame(callerDrive, userClient.getDrive());
+            assertEquals("fess-ds-gsuite-test", userClient.applicationName);
+            assertTrue(mockTransport.getRequestedUrls().isEmpty());
+        }
+    }
+
+    /** The clone keeps every other parameter, and the caller's own impersonation is not disturbed. */
+    @Test
+    public void test_forUser_overridesImpersonateUserAndKeepsOtherParameters() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.MAX_CACHED_CONTENT_SIZE, "2048");
+        params.put(GSuiteClient.IMPERSONATE_USER, "admin@example.com");
+        try (GSuiteClient client = new GSuiteClient(params, mockTransport)) {
+            final GSuiteClient userClient = client.forUser("u2@example.com");
+            assertEquals("2048", userClient.params.getAsString(GSuiteClient.MAX_CACHED_CONTENT_SIZE));
+            assertEquals(2048, userClient.maxCachedContentSize);
+            assertEquals("u2@example.com", userClient.params.getAsString(GSuiteClient.IMPERSONATE_USER));
+            assertEquals("u2@example.com", ((ServiceAccountCredentials) userClient.credentials).getServiceAccountUser());
+            assertEquals("admin@example.com", client.params.getAsString(GSuiteClient.IMPERSONATE_USER));
+            assertEquals("admin@example.com", ((ServiceAccountCredentials) client.credentials).getServiceAccountUser());
+        }
+    }
+
+    /** Two per-user clients must not share anything that binds a request to one of them. */
+    @Test
+    public void test_forUser_clientsDoNotShareRequestState() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport)) {
+            final GSuiteClient first = client.forUser("u1@example.com");
+            final GSuiteClient second = client.forUser("u2@example.com");
+            assertNotSame(first.params, second.params);
+            assertNotSame(first.credentials, second.credentials);
+            assertNotSame(first.requestInitializer, second.requestInitializer);
+            assertNotSame(first.getDrive(), second.getDrive());
+            assertSame(first.httpTransport, second.httpTransport);
+            assertEquals("u1@example.com", ((ServiceAccountCredentials) first.credentials).getServiceAccountUser());
+            assertEquals("u2@example.com", ((ServiceAccountCredentials) second.credentials).getServiceAccountUser());
         }
     }
 }

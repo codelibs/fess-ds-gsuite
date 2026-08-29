@@ -619,6 +619,32 @@ public class GSuiteClient implements AutoCloseable {
     }
 
     /**
+     * Returns a client that acts as another user through domain-wide delegation.
+     * <p>
+     * The returned client re-runs the ordinary construction path on a copy of this client's
+     * parameters with {@link #IMPERSONATE_USER} overridden, so it gets its own credentials, its own
+     * request initializer and its own Drive service, all bound to {@code userEmail}. Nothing that
+     * binds a request to a particular user is shared, so several per-user clients can be alive at
+     * once without interfering. This client is left untouched, including its own impersonation.
+     * <p>
+     * Only {@link #httpTransport} is shared, as a connection factory carrying no per-user state. The
+     * returned client therefore does not own the transport and must not outlive this client.
+     *
+     * @param userEmail The email address of the user to act as.
+     * @return A client bound to that user.
+     */
+    public GSuiteClient forUser(final String userEmail) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Creating a client for {}", userEmail);
+        }
+        final DataStoreParams userParams = params.newInstance();
+        userParams.put(IMPERSONATE_USER, userEmail);
+        final GSuiteClient client = new GSuiteClient(userParams, httpTransport);
+        client.setApplicationName(applicationName);
+        return client;
+    }
+
+    /**
      * Extracts the text from a file.
      * <p>
      * Note that {@code files.export} has no {@code supportsAllDrives} parameter in the Drive v3
