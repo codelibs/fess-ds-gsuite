@@ -15,6 +15,11 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.helper.PermissionHelper;
 import org.codelibs.fess.helper.SystemHelper;
@@ -23,6 +28,7 @@ import org.codelibs.fess.util.ComponentUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
 
+import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.Permission;
 import com.google.api.services.drive.model.User;
 
@@ -174,5 +180,114 @@ public class DrivePermissionResolverTest extends UnitDsTestCase {
     public void test_toRole_ownerWithoutEmailIsExcluded() {
         final User user = new User().setDisplayName("Owner");
         assertNull(newResolver(new DataStoreParams()).toRole(user));
+    }
+
+    /**
+     * A resolver whose permissions.list calls are recorded instead of issued.
+     */
+    private static final class RecordingResolver extends DrivePermissionResolver {
+
+        /** Every "id:useDomainAdminAccess" pair passed to listPermissions. */
+        private final List<String> calls = new ArrayList<>();
+
+        /** The number of listPermissions invocations. */
+        private final AtomicInteger count = new AtomicInteger();
+
+        /** The permissions returned for a shared drive ID. */
+        private final List<Permission> drivePermissions;
+
+        /** The permissions returned for a file ID. */
+        private final List<Permission> filePermissions;
+
+        RecordingResolver(final DataStoreParams params, final List<Permission> drivePermissions, final List<Permission> filePermissions) {
+            super(null, params);
+            this.drivePermissions = drivePermissions;
+            this.filePermissions = filePermissions;
+        }
+
+        @Override
+        protected List<Permission> listPermissions(final String id, final boolean useDomainAdminAccess) {
+            calls.add(id + ":" + useDomainAdminAccess);
+            count.incrementAndGet();
+            return useDomainAdminAccess ? drivePermissions : filePermissions;
+        }
+    }
+
+    @Test
+    public void test_resolve_usesInlinePermissionsWithoutApiCall() {
+        final RecordingResolver resolver = new RecordingResolver(new DataStoreParams(),
+                Arrays.asList(new Permission().setType("user").setEmailAddress("drive@example.com")),
+                Arrays.asList(new Permission().setType("user").setEmailAddress("file@example.com")));
+        final File file = new File().setId("F1")
+                .setDriveId("D1")
+                .setOwners(Arrays.asList(new User().setEmailAddress("o@example.com")))
+                .setPermissions(Arrays.asList(new Permission().setType("user").setEmailAddress("a@example.com")));
+
+        final List<String> roles = resolver.resolve(file);
+
+        assertEquals(0, resolver.count.get());
+        assertEquals(2, roles.size());
+        assertTrue(roles.contains("1o@example.com"));
+        assertTrue(roles.contains("1a@example.com"));
+    }
+
+    @Test
+    public void test_resolve_cachesSharedDriveAclPerDrive() {
+        final RecordingResolver resolver = new RecordingResolver(new DataStoreParams(),
+                Arrays.asList(new Permission().setType("group").setEmailAddress("team@example.com")),
+                Arrays.asList(new Permission().setType("user").setEmailAddress("file@example.com")));
+        final File first = new File().setId("F1").setDriveId("D1");
+        final File second = new File().setId("F2").setDriveId("D1");
+
+        final List<String> firstRoles = resolver.resolve(first);
+        final List<String> secondRoles = resolver.resolve(second);
+
+        assertEquals(1, resolver.count.get());
+        assertEquals("D1:true", resolver.calls.get(0));
+        assertEquals(1, firstRoles.size());
+        assertEquals("2team@example.com", firstRoles.get(0));
+        assertEquals(firstRoles, secondRoles);
+    }
+
+    @Test
+    public void test_resolve_fetchesAugmentedPermissionsWithoutDomainAdminAccess() {
+        final RecordingResolver resolver = new RecordingResolver(new DataStoreParams(),
+                Arrays.asList(new Permission().setType("group").setEmailAddress("team@example.com")),
+                Arrays.asList(new Permission().setType("user").setEmailAddress("file@example.com")));
+        final File file = new File().setId("F1").setDriveId("D1").setHasAugmentedPermissions(Boolean.TRUE);
+
+        final List<String> roles = resolver.resolve(file);
+
+        assertEquals(2, resolver.count.get());
+        assertEquals("D1:true", resolver.calls.get(0));
+        assertEquals("F1:false", resolver.calls.get(1));
+        assertEquals(2, roles.size());
+        assertTrue(roles.contains("2team@example.com"));
+        assertTrue(roles.contains("1file@example.com"));
+    }
+
+    @Test
+    public void test_resolve_returnsEmptyWhenNothingIsResolvable() {
+        final RecordingResolver resolver = new RecordingResolver(new DataStoreParams(), new ArrayList<>(), new ArrayList<>());
+        final File file = new File().setId("F1");
+
+        final List<String> roles = resolver.resolve(file);
+
+        assertEquals(0, resolver.count.get());
+        assertNotNull(roles);
+        assertTrue(roles.isEmpty());
+    }
+
+    @Test
+    public void test_resolve_deduplicatesOwnerAndPermission() {
+        final RecordingResolver resolver = new RecordingResolver(new DataStoreParams(), new ArrayList<>(), new ArrayList<>());
+        final File file = new File().setId("F1")
+                .setOwners(Arrays.asList(new User().setEmailAddress("a@example.com")))
+                .setPermissions(Arrays.asList(new Permission().setType("user").setEmailAddress("a@example.com")));
+
+        final List<String> roles = resolver.resolve(file);
+
+        assertEquals(1, roles.size());
+        assertEquals("1a@example.com", roles.get(0));
     }
 }

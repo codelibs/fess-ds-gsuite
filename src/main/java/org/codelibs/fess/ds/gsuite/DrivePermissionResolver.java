@@ -15,7 +15,12 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -23,6 +28,7 @@ import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.util.ComponentUtil;
 
+import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.Permission;
 import com.google.api.services.drive.model.User;
 
@@ -61,6 +67,9 @@ public class DrivePermissionResolver {
     /** The role format applied to a {@code type=domain} permission. */
     protected final String domainPermissionFormat;
 
+    /** Roles of a shared drive, keyed by drive ID. permissions.list runs once per drive. */
+    protected final Map<String, List<String>> driveRoleCache = new ConcurrentHashMap<>();
+
     /**
      * Constructs a resolver bound to a single client.
      *
@@ -72,6 +81,97 @@ public class DrivePermissionResolver {
         this.client = client;
         domainPermissionFormat =
                 params.getAsString(GoogleDriveDataStore.DOMAIN_PERMISSION_FORMAT, GoogleDriveDataStore.DEFAULT_DOMAIN_PERMISSION_FORMAT);
+    }
+
+    /**
+     * Resolves every Fess search role that must be attached to the given file.
+     * <p>
+     * Three tiers, in order, so that the number of extra API calls stays proportional to the number
+     * of shared drives rather than to the number of files:
+     * </p>
+     * <ol>
+     * <li>the inline {@code permissions} of files.list, costing nothing extra;</li>
+     * <li>for an item of a shared drive whose inline permissions are absent (the Drive API does not
+     * populate them there), the ACL of the shared drive itself, fetched once per drive with
+     * {@code useDomainAdminAccess=true} and cached;</li>
+     * <li>for an item whose {@code hasAugmentedPermissions} is true, its own permissions, fetched
+     * without {@code useDomainAdminAccess} because that flag is only honoured for shared drive
+     * IDs.</li>
+     * </ol>
+     *
+     * @param file The file.
+     * @return The distinct search roles. Never null, but possibly empty.
+     */
+    public List<String> resolve(final File file) {
+        final Set<String> roles = new LinkedHashSet<>();
+        if (file.getOwners() != null) {
+            for (final User owner : file.getOwners()) {
+                addRole(roles, toRole(owner));
+            }
+        }
+        final List<Permission> inlinePermissions = file.getPermissions();
+        if (inlinePermissions != null && !inlinePermissions.isEmpty()) {
+            addPermissionRoles(roles, inlinePermissions);
+        } else {
+            final String driveId = file.getDriveId();
+            if (StringUtil.isNotBlank(driveId)) {
+                roles.addAll(getDriveRoles(driveId));
+            }
+        }
+        if (Boolean.TRUE.equals(file.getHasAugmentedPermissions()) && StringUtil.isNotBlank(file.getId())) {
+            addPermissionRoles(roles, listPermissions(file.getId(), false));
+        }
+        return new ArrayList<>(roles);
+    }
+
+    /**
+     * Returns the roles of a shared drive, calling permissions.list at most once per drive ID.
+     * <p>
+     * A failure is logged and cached as an empty list so that a broken drive does not trigger one
+     * failing request per file. The caller then falls back to {@code default_permissions}, and the
+     * document is skipped when that is unset.
+     * </p>
+     *
+     * @param driveId The shared drive ID.
+     * @return The roles of the shared drive. Never null, but possibly empty.
+     */
+    protected List<String> getDriveRoles(final String driveId) {
+        return driveRoleCache.computeIfAbsent(driveId, id -> {
+            final Set<String> roles = new LinkedHashSet<>();
+            try {
+                addPermissionRoles(roles, listPermissions(id, true));
+            } catch (final Exception e) {
+                logger.warn("Failed to get the permissions of a shared drive: {}", id, e);
+            }
+            return new ArrayList<>(roles);
+        });
+    }
+
+    /**
+     * Converts every permission and adds the non-null results to the given set.
+     *
+     * @param roles The destination set.
+     * @param permissions The permissions to convert. May be null.
+     */
+    protected void addPermissionRoles(final Set<String> roles, final List<Permission> permissions) {
+        if (permissions == null) {
+            return;
+        }
+        for (final Permission permission : permissions) {
+            addRole(roles, toRole(permission));
+        }
+    }
+
+    /**
+     * Adds a role to the given set unless it is null or blank.
+     *
+     * @param roles The destination set.
+     * @param role The role.
+     */
+    protected void addRole(final Set<String> roles, final String role) {
+        if (StringUtil.isNotBlank(role)) {
+            roles.add(role);
+        }
     }
 
     /**
