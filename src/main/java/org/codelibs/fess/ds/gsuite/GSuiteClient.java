@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -41,6 +42,7 @@ import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codelibs.core.exception.InterruptedRuntimeException;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
@@ -136,6 +138,15 @@ public class GSuiteClient implements AutoCloseable {
     /** Pattern for cleaning up PEM-encoded private keys (removes headers, footers, and newlines). */
     protected static final String PEM_CLEANUP_PATTERN = "\\\\n|\\n|-----[A-Z ]+-----";
 
+    /** Parameter key for the page size of files.list. */
+    protected static final String PAGE_SIZE = "page_size";
+
+    /** Default page size of files.list, which is also the maximum the API accepts. */
+    protected static final int DEFAULT_PAGE_SIZE = 1000;
+
+    /** The maximum page size accepted by files.list. A larger value is rejected with a 400. */
+    protected static final int FILE_PAGE_SIZE_LIMIT = 1000;
+
     /** The maximum page size accepted by permissions.list. The API caps this at 100. */
     protected static final int PERMISSION_PAGE_SIZE_LIMIT = 100;
 
@@ -209,6 +220,16 @@ public class GSuiteClient implements AutoCloseable {
     /** The upper bound of the exponential back-off, in milliseconds. */
     protected int maxBackOffMillis = DEFAULT_MAX_BACKOFF_MS;
 
+    /** The page size of files.list. */
+    protected int pageSize = DEFAULT_PAGE_SIZE;
+
+    /**
+     * Invoked when a listing fails permanently. The default only logs; the data store replaces it
+     * with one that also records the failure so that the operator finds it in the failure URL list.
+     */
+    protected BiConsumer<String, Exception> failureHandler =
+            (target, e) -> logger.warn("Failed to access {}. Skipping it and continuing the crawl.", target, e);
+
     /** The name of the application. */
     protected String applicationName = "Fess DataStore";
 
@@ -245,6 +266,7 @@ public class GSuiteClient implements AutoCloseable {
         if (StringUtil.isNotBlank(params.getAsString(REFRESH_TOKEN_INTERVAL))) {
             logger.warn("{} is no longer used. Access tokens are refreshed by google-auth-library.", REFRESH_TOKEN_INTERVAL);
         }
+        pageSize = clampPageSize(PAGE_SIZE, getIntParam(params, PAGE_SIZE, DEFAULT_PAGE_SIZE), FILE_PAGE_SIZE_LIMIT);
         maxRetries = getIntParam(params, MAX_RETRIES, DEFAULT_MAX_RETRIES);
         retryInitialIntervalMillis = getIntParam(params, RETRY_INITIAL_INTERVAL_MS, DEFAULT_RETRY_INITIAL_INTERVAL_MS);
         maxBackOffMillis = getIntParam(params, MAX_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
@@ -409,6 +431,12 @@ public class GSuiteClient implements AutoCloseable {
 
     /**
      * Retrieves files from Google Drive.
+     * <p>
+     * A permanent failure in the middle of the paging is handed to {@link #failureHandler} and this
+     * method returns: the enclosing loop over the shared drives or the users of the domain must keep
+     * going, so that one inaccessible scope does not abort the whole crawl. The pages already
+     * consumed are kept, and the failure is reported rather than swallowed.
+     * </p>
      * @param q The query to search for files.
      * @param corpora The corpora to search in.
      * @param spaces The spaces to search in.
@@ -419,43 +447,136 @@ public class GSuiteClient implements AutoCloseable {
         if (logger.isDebugEnabled()) {
             logger.debug("query: {}, corpora: {}, spaces: {}, fields: {}", q, corpora, spaces, fields);
         }
+        final String target = describeTarget("files.list(corpora=" + corpora + ", q=" + q + ")");
         long counter = 1;
         String pageToken = null;
         try {
             do {
-                final Drive.Files.List list = getDrive().files().list().setPageToken(pageToken);
-                if (StringUtil.isNotBlank(q)) {
-                    list.setQ(q);
-                }
-                if (StringUtil.isNotBlank(fields)) {
-                    list.setFields(fields);
-                }
-                if (StringUtil.isNotBlank(corpora)) {
-                    list.setCorpora(corpora);
-                }
-                if (ALL_DRIVES.equals(corpora)) {
-                    list.setIncludeItemsFromAllDrives(true);
-                    list.setSupportsAllDrives(true);
-                }
-                if (StringUtil.isNotBlank(spaces)) {
-                    list.setSpaces(spaces);
-                }
+                final String currentToken = pageToken;
                 if (logger.isDebugEnabled()) {
-                    logger.debug("Accessing files: {}=>{}", counter, pageToken);
+                    logger.debug("Accessing files: {}=>{}", counter, currentToken);
                 }
-                final FileList result = list.execute();
+                final FileList result = executeWithRetry(target, () -> {
+                    final Drive.Files.List list =
+                            getDrive().files().list().setPageToken(currentToken).setPageSize(Integer.valueOf(pageSize));
+                    if (StringUtil.isNotBlank(q)) {
+                        list.setQ(q);
+                    }
+                    if (StringUtil.isNotBlank(fields)) {
+                        list.setFields(fields);
+                    }
+                    if (StringUtil.isNotBlank(corpora)) {
+                        list.setCorpora(corpora);
+                    }
+                    if (ALL_DRIVES.equals(corpora)) {
+                        list.setIncludeItemsFromAllDrives(true);
+                        list.setSupportsAllDrives(true);
+                    }
+                    if (StringUtil.isNotBlank(spaces)) {
+                        list.setSpaces(spaces);
+                    }
+                    return list.execute();
+                });
                 if (logger.isDebugEnabled()) {
                     logger.debug("filelist: {}", result);
                 }
-                for (final File file : result.getFiles()) {
-                    consumer.accept(file);
+                if (Boolean.TRUE.equals(result.getIncompleteSearch())) {
+                    onIncompleteSearch(target);
+                }
+                if (result.getFiles() != null) {
+                    for (final File file : result.getFiles()) {
+                        consumer.accept(file);
+                    }
                 }
                 pageToken = result.getNextPageToken();
                 counter++;
             } while (pageToken != null);
         } catch (final IOException e) {
-            throw new DataStoreException("Failed to access files.", e);
+            // The token of the next page died with the failed page, so this listing cannot resume.
+            reportFailure(target, e);
         }
+    }
+
+    /**
+     * Describes a listing for the log and for the failure report, naming the identity the client acts
+     * as. A crawl runs one client per user, so without the identity a failure cannot be attributed
+     * to the user whose Drive could not be listed.
+     *
+     * @param operation The operation, e.g. {@code files.list(...)}.
+     * @return The description.
+     */
+    protected String describeTarget(final String operation) {
+        final String impersonateUser = params.getAsString(IMPERSONATE_USER);
+        return StringUtil.isBlank(impersonateUser) ? operation : operation + " as " + impersonateUser;
+    }
+
+    /**
+     * Sets the handler invoked when a listing fails permanently. The crawl continues after the
+     * handler returns, so the handler is the only place the failure is reported.
+     *
+     * @param failureHandler A handler that receives the description of the failed listing and the
+     *            failure. Ignored when null.
+     */
+    public void setFailureHandler(final BiConsumer<String, Exception> failureHandler) {
+        if (failureHandler != null) {
+            this.failureHandler = failureHandler;
+        }
+    }
+
+    /**
+     * Hands a permanent listing failure to {@link #failureHandler}.
+     * <p>
+     * An interruption is never downgraded into a per-target failure: {@link #executeWithRetry} wraps
+     * one while waiting to retry, and a stop request must stop the crawl rather than merely skip the
+     * scope it happened to interrupt.
+     * </p>
+     *
+     * @param target The description of the failed listing.
+     * @param e The failure.
+     */
+    protected void reportFailure(final String target, final IOException e) {
+        if (e.getCause() instanceof final InterruptedException ie) {
+            throw new InterruptedRuntimeException(ie);
+        }
+        failureHandler.accept(target, e);
+    }
+
+    /**
+     * Called when a files.list response is flagged {@code incompleteSearch}, meaning Drive could not
+     * search every corpus and the result set is silently short.
+     *
+     * @param target The description of the listing, naming the corpora and the query.
+     */
+    protected void onIncompleteSearch(final String target) {
+        logger.warn(
+                "Drive could not search every corpus for {}, so the result is incomplete " + "and some items are missing from this crawl.",
+                target);
+    }
+
+    /**
+     * Clamps a page size into the range the endpoint accepts.
+     * <p>
+     * The caps differ per endpoint -- files.list accepts 1000 while permissions.list and drives.list
+     * stop at 100 -- and a value above the cap is rejected with a 400, which would fail every page of
+     * the listing rather than just the first.
+     * </p>
+     *
+     * @param key The parameter key, used in the warning.
+     * @param value The configured value.
+     * @param limit The maximum the endpoint accepts.
+     * @return The clamped value.
+     */
+    protected static int clampPageSize(final String key, final int value, final int limit) {
+        if (value < 1) {
+            logger.warn("{} must be at least 1: {}. Using 1.", key, Integer.valueOf(value));
+            return 1;
+        }
+        if (value > limit) {
+            logger.warn("{} is capped at {} by the API: {}. Using {}.", key, Integer.valueOf(limit), Integer.valueOf(value),
+                    Integer.valueOf(limit));
+            return limit;
+        }
+        return value;
     }
 
     /**
@@ -534,6 +655,12 @@ public class GSuiteClient implements AutoCloseable {
      * {@link #ALL_DRIVES}, this scopes the listing to a single {@code driveId}, so a crawl can walk
      * the drives of a domain one at a time.
      *
+     * <p>
+     * Like {@link #getFiles(String, String, String, String, Consumer)}, a permanent failure is
+     * reported to {@link #failureHandler} instead of being thrown, so that one shared drive the
+     * crawler may not read does not abort the drives that follow it.
+     * </p>
+     *
      * @param driveId The shared drive ID.
      * @param q The query to filter files, or null.
      * @param fields The field projection, or null.
@@ -543,23 +670,31 @@ public class GSuiteClient implements AutoCloseable {
         if (logger.isDebugEnabled()) {
             logger.debug("driveId: {}, query: {}, fields: {}", driveId, q, fields);
         }
+        final String target = describeTarget("files.list(corpora=" + DRIVE_CORPORA + ", driveId=" + driveId + ", q=" + q + ")");
         String pageToken = null;
         try {
             do {
-                final Drive.Files.List list = getDrive().files()
-                        .list()
-                        .setCorpora(DRIVE_CORPORA)
-                        .setDriveId(driveId)
-                        .setIncludeItemsFromAllDrives(Boolean.TRUE)
-                        .setSupportsAllDrives(Boolean.TRUE)
-                        .setPageToken(pageToken);
-                if (StringUtil.isNotBlank(q)) {
-                    list.setQ(q);
+                final String currentToken = pageToken;
+                final FileList result = executeWithRetry(target, () -> {
+                    final Drive.Files.List list = getDrive().files()
+                            .list()
+                            .setCorpora(DRIVE_CORPORA)
+                            .setDriveId(driveId)
+                            .setIncludeItemsFromAllDrives(Boolean.TRUE)
+                            .setSupportsAllDrives(Boolean.TRUE)
+                            .setPageSize(Integer.valueOf(pageSize))
+                            .setPageToken(currentToken);
+                    if (StringUtil.isNotBlank(q)) {
+                        list.setQ(q);
+                    }
+                    if (StringUtil.isNotBlank(fields)) {
+                        list.setFields(fields);
+                    }
+                    return list.execute();
+                });
+                if (Boolean.TRUE.equals(result.getIncompleteSearch())) {
+                    onIncompleteSearch(target);
                 }
-                if (StringUtil.isNotBlank(fields)) {
-                    list.setFields(fields);
-                }
-                final FileList result = list.execute();
                 if (result.getFiles() != null) {
                     for (final File file : result.getFiles()) {
                         consumer.accept(file);
@@ -568,7 +703,7 @@ public class GSuiteClient implements AutoCloseable {
                 pageToken = result.getNextPageToken();
             } while (pageToken != null);
         } catch (final IOException e) {
-            throw new DataStoreException("Failed to access files in a shared drive: " + driveId, e);
+            reportFailure(target, e);
         }
     }
 
@@ -592,6 +727,7 @@ public class GSuiteClient implements AutoCloseable {
         final List<String> userList = new ArrayList<>();
         final HttpRequestFactory requestFactory = createAdminRequestFactory();
         final JsonObjectParser parser = new JsonObjectParser(GsonFactory.getDefaultInstance());
+        final String target = describeTarget("users.list(query=" + userQuery + ")");
         String pageToken = null;
         try {
             do {
@@ -606,7 +742,8 @@ public class GSuiteClient implements AutoCloseable {
                 if (pageToken != null) {
                     url.put("pageToken", pageToken);
                 }
-                final HttpResponse response = requestFactory.buildGetRequest(url).setParser(parser).execute();
+                final HttpResponse response =
+                        executeWithRetry(target, () -> requestFactory.buildGetRequest(url).setParser(parser).execute());
                 try {
                     final GenericJson json = response.parseAs(GenericJson.class);
                     pageToken = json == null ? null : collectUserEmails(json, userList);
@@ -669,8 +806,10 @@ public class GSuiteClient implements AutoCloseable {
      * binds a request to a particular user is shared, so several per-user clients can be alive at
      * once without interfering. This client is left untouched, including its own impersonation.
      * <p>
-     * Only {@link #httpTransport} is shared, as a connection factory carrying no per-user state. The
-     * returned client therefore does not own the transport and must not outlive this client.
+     * Only {@link #httpTransport} is shared, as a connection factory carrying no per-user state, and
+     * {@link #failureHandler}, so that a failure hit while listing that user's Drive is reported
+     * through the same channel as one hit by this client. The returned client therefore does not own
+     * the transport and must not outlive this client.
      *
      * @param userEmail The email address of the user to act as.
      * @return A client bound to that user.
@@ -683,6 +822,7 @@ public class GSuiteClient implements AutoCloseable {
         userParams.put(IMPERSONATE_USER, userEmail);
         final GSuiteClient client = new GSuiteClient(userParams, httpTransport);
         client.setApplicationName(applicationName);
+        client.setFailureHandler(failureHandler);
         return client;
     }
 

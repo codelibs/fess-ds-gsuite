@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -58,6 +59,18 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
     }
 
     /**
+     * Builds parameters whose retry budget is a few milliseconds, so a retry test never sleeps long.
+     * @return The parameters.
+     */
+    static DataStoreParams newFastRetryParams() {
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.MAX_RETRIES, "2");
+        params.put(GSuiteClient.RETRY_INITIAL_INTERVAL_MS, "1");
+        params.put(GSuiteClient.MAX_BACKOFF_MS, "4");
+        return params;
+    }
+
+    /**
      * Builds a Drive service bound to the given transport with a no-op request initializer,
      * so that no OAuth token exchange happens during the test.
      * @param transport The transport.
@@ -67,6 +80,36 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
         return new Drive.Builder(transport, GsonFactory.getDefaultInstance(), request -> {
             // no credentials in tests
         }).setApplicationName("fess-ds-gsuite-test").build();
+    }
+
+    /**
+     * Builds a client whose Drive service is bound to the given transport.
+     * <p>
+     * The local is deliberately not named {@code drive}: inside the anonymous subclass body the
+     * inherited {@link GSuiteClient#drive} field would shadow it.
+     * </p>
+     * @param params The parameters.
+     * @param mockTransport The transport.
+     * @return The client.
+     */
+    static GSuiteClient newClient(final DataStoreParams params, final MockDriveTransport mockTransport) {
+        final Drive mockDrive = newDrive(mockTransport);
+        return new GSuiteClient(params, mockTransport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+        };
+    }
+
+    /**
+     * Queues a JSON error response.
+     * @param mockTransport The transport.
+     * @param statusCode The status code.
+     * @param body The JSON body.
+     */
+    static void queueError(final MockDriveTransport mockTransport, final int statusCode, final String body) {
+        mockTransport.queue(statusCode, "application/json; charset=UTF-8", body);
     }
 
     @Test
@@ -355,6 +398,171 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
             assertEquals("admin@example.com", client.params.getAsString(GSuiteClient.IMPERSONATE_USER));
             assertEquals("admin@example.com", ((ServiceAccountCredentials) client.credentials).getServiceAccountUser());
         }
+    }
+
+    /** files.list must be paged and must send the configured page size. */
+    @Test
+    public void test_getFiles_pagesAndSendsPageSize() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"nextPageToken\":\"P2\",\"files\":[{\"id\":\"f1\",\"name\":\"a.txt\"}]}");
+        mockTransport.queueJson("{\"files\":[{\"id\":\"f2\",\"name\":\"b.txt\"}]}");
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.PAGE_SIZE, "123");
+        final List<String> ids = new ArrayList<>();
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            client.getFiles(null, GSuiteClient.ALL_DRIVES, null, "*", file -> ids.add(file.getId()));
+        }
+        assertEquals(2, ids.size());
+        assertEquals("f1", ids.get(0));
+        assertEquals("f2", ids.get(1));
+        final List<String> urls = mockTransport.getRequestedUrls();
+        assertEquals(2, urls.size());
+        assertTrue(urls.get(0), urls.get(0).contains("pageSize=123"));
+        assertTrue(urls.get(1), urls.get(1).contains("pageToken=P2"));
+    }
+
+    /** A page size above the files.list limit of 1000 must be clamped, not sent verbatim and rejected with a 400. */
+    @Test
+    public void test_getFiles_clampsPageSizeToApiLimit() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"files\":[]}");
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.PAGE_SIZE, "5000");
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            client.getFiles(null, GSuiteClient.ALL_DRIVES, null, "*", file -> fail("no file is expected"));
+        }
+        final String url = mockTransport.getRequestedUrls().get(0);
+        assertTrue(url, url.contains("pageSize=1000"));
+        assertFalse(url, url.contains("pageSize=5000"));
+    }
+
+    /**
+     * A permanent files.list failure must be handed to the failure handler and must not propagate:
+     * one broken user or drive may not abort the whole crawl. The pages already read are kept.
+     */
+    @Test
+    public void test_getFiles_reportsFailureInsteadOfThrowing() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"nextPageToken\":\"P2\",\"files\":[{\"id\":\"f1\",\"name\":\"a.txt\"}]}");
+        queueError(mockTransport, 400, "{\"error\":{\"code\":400,\"message\":\"bad request\"}}");
+        final List<String> ids = new ArrayList<>();
+        final List<String> failedTargets = new ArrayList<>();
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            client.setFailureHandler((target, e) -> failedTargets.add(target));
+            client.getFiles(null, GSuiteClient.ALL_DRIVES, null, "*", file -> ids.add(file.getId()));
+        }
+        assertEquals(1, ids.size());
+        assertEquals("f1", ids.get(0));
+        assertEquals(1, failedTargets.size());
+        assertTrue(failedTargets.get(0), failedTargets.get(0).contains("files.list"));
+        assertTrue(failedTargets.get(0), failedTargets.get(0).contains(GSuiteClient.ALL_DRIVES));
+    }
+
+    /** The reported target must name the impersonated user, so a failed My Drive listing is attributable. */
+    @Test
+    public void test_getFiles_failureTargetNamesTheImpersonatedUser() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        queueError(mockTransport, 400, "{\"error\":{\"code\":400,\"message\":\"bad request\"}}");
+        final DataStoreParams params = newFastRetryParams();
+        params.put(GSuiteClient.IMPERSONATE_USER, "u1@example.com");
+        final List<String> failedTargets = new ArrayList<>();
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            client.setFailureHandler((target, e) -> failedTargets.add(target));
+            client.getFiles(null, GSuiteClient.USER_CORPORA, null, "*", file -> fail("no file is expected"));
+        }
+        assertEquals(1, failedTargets.size());
+        assertTrue(failedTargets.get(0), failedTargets.get(0).contains("u1@example.com"));
+    }
+
+    /** An incompleteSearch result is silently short, so it must be surfaced with the corpora and the query. */
+    @Test
+    public void test_getFiles_incompleteSearchIsReported() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"incompleteSearch\":true,\"files\":[{\"id\":\"f1\",\"name\":\"a.txt\"}]}");
+        final Drive mockDrive = newDrive(mockTransport);
+        final List<String> incompleteTargets = new ArrayList<>();
+        final List<String> ids = new ArrayList<>();
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+
+            @Override
+            protected void onIncompleteSearch(final String target) {
+                incompleteTargets.add(target);
+            }
+        }) {
+            client.getFiles("name contains 'report'", GSuiteClient.ALL_DRIVES, null, "*", file -> ids.add(file.getId()));
+        }
+        assertEquals(1, ids.size());
+        assertEquals(1, incompleteTargets.size());
+        assertTrue(incompleteTargets.get(0), incompleteTargets.get(0).contains(GSuiteClient.ALL_DRIVES));
+        assertTrue(incompleteTargets.get(0), incompleteTargets.get(0).contains("name contains 'report'"));
+    }
+
+    /** A throttled page is retried and the listing then completes with nothing reported as a failure. */
+    @Test
+    public void test_getFiles_retriesThrottledPage() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        queueError(mockTransport, 429, "{\"error\":{\"code\":429,\"message\":\"slow down\"}}");
+        mockTransport.queueJson("{\"files\":[{\"id\":\"f1\",\"name\":\"a.txt\"}]}");
+        final List<String> ids = new ArrayList<>();
+        final List<String> failedTargets = new ArrayList<>();
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            client.setFailureHandler((target, e) -> failedTargets.add(target));
+            client.getFiles(null, GSuiteClient.ALL_DRIVES, null, "*", file -> ids.add(file.getId()));
+        }
+        assertEquals(1, ids.size());
+        assertEquals(2, mockTransport.getRequestedUrls().size());
+        assertTrue(failedTargets.toString(), failedTargets.isEmpty());
+    }
+
+    /** getFilesInDrive must send the configured page size too. */
+    @Test
+    public void test_getFilesInDrive_sendsPageSize() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"files\":[]}");
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.PAGE_SIZE, "250");
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            client.getFilesInDrive("drive1", null, null, file -> fail("no file is expected"));
+        }
+        final String url = mockTransport.getRequestedUrls().get(0);
+        assertTrue(url, url.contains("pageSize=250"));
+    }
+
+    /**
+     * One inaccessible shared drive must be reported and skipped so the remaining drives are still
+     * crawled. A 403 that is not a quota error is permanent, so it must not be retried either.
+     */
+    @Test
+    public void test_getFilesInDrive_reportsFailureInsteadOfThrowing() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        queueError(mockTransport, 403, "{\"error\":{\"code\":403,\"errors\":[{\"reason\":\"insufficientFilePermissions\","
+                + "\"message\":\"The user does not have sufficient permissions.\"}],\"message\":\"Insufficient permissions\"}}");
+        final List<String> failedTargets = new ArrayList<>();
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            client.setFailureHandler((target, e) -> failedTargets.add(target));
+            client.getFilesInDrive("drive1", null, null, file -> fail("no file is expected"));
+        }
+        assertEquals(1, mockTransport.getRequestedUrls().size());
+        assertEquals(1, failedTargets.size());
+        assertTrue(failedTargets.get(0), failedTargets.get(0).contains("drive1"));
+    }
+
+    /** A per-user client must inherit the failure handler, or a failure in one My Drive goes unrecorded. */
+    @Test
+    public void test_forUser_inheritsFailureHandler() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        final List<String> failedTargets = new ArrayList<>();
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport)) {
+            client.setFailureHandler((target, e) -> failedTargets.add(target));
+            final GSuiteClient userClient = client.forUser("u1@example.com");
+            userClient.failureHandler.accept("files.list", new IOException("boom"));
+        }
+        assertEquals(1, failedTargets.size());
+        assertEquals("files.list", failedTargets.get(0));
     }
 
     /** Two per-user clients must not share anything that binds a request to one of them. */

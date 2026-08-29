@@ -446,6 +446,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
         final String crawlTarget = (String) configMap.get(CRAWL_TARGET);
+        // A listing the client could not finish must not disappear: the crawl goes on, but the
+        // operator has to find the failure in the log and in the failure URL list.
+        client.setFailureHandler((target, e) -> handleClientFailure(dataConfig, target, e));
         // A file shared with several users shows up once per viewpoint, so index it once.
         final Set<String> crawledFileIds = ConcurrentHashMap.newKeySet();
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
@@ -471,6 +474,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             throw new InterruptedRuntimeException(e);
         } finally {
             executorService.shutdownNow();
+        }
+    }
+
+    /**
+     * Records a Drive listing failure that the client did not propagate, so that the crawl continues
+     * while the operator still sees which drive or user failed.
+     *
+     * @param dataConfig The data configuration.
+     * @param target The description of the failed listing.
+     * @param e The failure.
+     */
+    protected void handleClientFailure(final DataConfig dataConfig, final String target, final Exception e) {
+        logger.warn("Failed to access {}. Continuing the crawl without it.", target, e);
+        try {
+            ComponentUtil.getComponent(FailureUrlService.class).store(dataConfig, e.getClass().getCanonicalName(), target, e);
+        } catch (final Exception ex) {
+            logger.warn("Failed to record the failure of {}.", target, ex);
         }
     }
 
