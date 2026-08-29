@@ -99,6 +99,9 @@ public class GSuiteClient implements AutoCloseable {
     /** Constant for all drives. */
     public static final String ALL_DRIVES = "allDrives";
 
+    /** Corpora value that scopes files.list to a single shared drive. */
+    public static final String DRIVE_CORPORA = "drive";
+
     /** Default maximum cached content size in bytes (1MB). */
     protected static final int DEFAULT_MAX_CACHED_CONTENT_SIZE = 1024 * 1024;
 
@@ -461,6 +464,51 @@ public class GSuiteClient implements AutoCloseable {
             } while (pageToken != null);
         } catch (final IOException e) {
             throw new DataStoreException("Failed to access shared drives.", e);
+        }
+    }
+
+    /**
+     * Walks every file of one shared drive, following pagination.
+     * <p>
+     * Unlike {@link #getFiles(String, String, String, String, Consumer)} with
+     * {@link #ALL_DRIVES}, this scopes the listing to a single {@code driveId}, so a crawl can walk
+     * the drives of a domain one at a time.
+     *
+     * @param driveId The shared drive ID.
+     * @param q The query to filter files, or null.
+     * @param fields The field projection, or null.
+     * @param consumer A consumer for each file.
+     */
+    public void getFilesInDrive(final String driveId, final String q, final String fields, final Consumer<File> consumer) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("driveId: {}, query: {}, fields: {}", driveId, q, fields);
+        }
+        String pageToken = null;
+        try {
+            do {
+                final Drive.Files.List list = getDrive().files()
+                        .list()
+                        .setCorpora(DRIVE_CORPORA)
+                        .setDriveId(driveId)
+                        .setIncludeItemsFromAllDrives(Boolean.TRUE)
+                        .setSupportsAllDrives(Boolean.TRUE)
+                        .setPageToken(pageToken);
+                if (StringUtil.isNotBlank(q)) {
+                    list.setQ(q);
+                }
+                if (StringUtil.isNotBlank(fields)) {
+                    list.setFields(fields);
+                }
+                final FileList result = list.execute();
+                if (result.getFiles() != null) {
+                    for (final File file : result.getFiles()) {
+                        consumer.accept(file);
+                    }
+                }
+                pageToken = result.getNextPageToken();
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to access files in a shared drive: " + driveId, e);
         }
     }
 

@@ -24,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.Permission;
 
 /**
@@ -173,6 +174,52 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
         }) {
             client.getDrives(d -> driveIds.add(d.getId()));
             assertTrue(driveIds.isEmpty());
+            assertEquals(1, transport.getRequestedUrls().size());
+        }
+    }
+
+    @Test
+    public void test_getFilesInDrive_scopesToSingleDrive() {
+        final MockDriveTransport transport = new MockDriveTransport();
+        transport.queueJson("{\"nextPageToken\":\"F2\",\"files\":[{\"id\":\"f1\",\"name\":\"a.txt\"}]}");
+        transport.queueJson("{\"files\":[{\"id\":\"f2\",\"name\":\"b.txt\"}]}");
+        final Drive mockDrive = newDrive(transport);
+        final List<String> fileIds = new ArrayList<>();
+        try (GSuiteClient client = new GSuiteClient(newParams(), transport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+        }) {
+            client.getFilesInDrive("drive1", "trashed = false", "nextPageToken,files(id,name)",
+                    (final File file) -> fileIds.add(file.getId()));
+            assertEquals(2, fileIds.size());
+            assertEquals("f1", fileIds.get(0));
+            assertEquals("f2", fileIds.get(1));
+            final List<String> urls = transport.getRequestedUrls();
+            assertEquals(2, urls.size());
+            assertTrue(urls.get(0), urls.get(0).contains("corpora=drive"));
+            assertTrue(urls.get(0), urls.get(0).contains("driveId=drive1"));
+            assertTrue(urls.get(0), urls.get(0).contains("includeItemsFromAllDrives=true"));
+            assertTrue(urls.get(0), urls.get(0).contains("supportsAllDrives=true"));
+            assertTrue(urls.get(1), urls.get(1).contains("pageToken=F2"));
+        }
+    }
+
+    @Test
+    public void test_getFilesInDrive_emptyResponse() {
+        final MockDriveTransport transport = new MockDriveTransport();
+        transport.queueJson("{}");
+        final Drive mockDrive = newDrive(transport);
+        final List<String> fileIds = new ArrayList<>();
+        try (GSuiteClient client = new GSuiteClient(newParams(), transport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+        }) {
+            client.getFilesInDrive("drive1", null, null, (final File file) -> fileIds.add(file.getId()));
+            assertTrue(fileIds.isEmpty());
             assertEquals(1, transport.getRequestedUrls().size());
         }
     }
