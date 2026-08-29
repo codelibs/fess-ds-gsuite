@@ -16,9 +16,13 @@
 package org.codelibs.fess.ds.gsuite;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -603,6 +607,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * drain in time: an advanced token would silently skip the changes whose files never reached the
      * index.
      * </p>
+     * <p>
+     * The tokens are checked against {@link #buildCrawlSignature} before anything is crawled, so a
+     * configuration change discards them and the run degrades to a full crawl of every scope.
+     * </p>
      *
      * @param dataConfig The data configuration.
      * @param callback The callback to index the files.
@@ -622,6 +630,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         // changes.list nests the file under changes(file(...)), so it needs the inner projection.
         client.setFileFields(getFileFieldProjection(paramMap));
         final DriveCrawlState state = isIncrementalConfig(dataConfig) ? newCrawlState(dataConfig) : null;
+        // A stored token is only meaningful for the configuration it was taken in.
+        applyCrawlSignature(state, paramMap);
         // A file shared with several users shows up once per viewpoint, so index it once.
         final Set<String> crawledFileIds = ConcurrentHashMap.newKeySet();
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
@@ -667,6 +677,85 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      */
     protected DriveCrawlState newCrawlState(final DataConfig dataConfig) {
         return new DriveCrawlState(dataConfig);
+    }
+
+    /**
+     * Builds a single line fingerprint of the configuration that decides what a scope yields.
+     * <p>
+     * A stored start page token only describes the population it was taken over. Widening
+     * {@code query}, switching {@code corpora} from {@code user} to {@code allDrives} or crawling as
+     * a different {@code impersonate_user} all leave files that the previous run never indexed and
+     * that no change feed will ever report, because they did not change. Resuming such a token skips
+     * them permanently, so the signature has to invalidate it.
+     * </p>
+     * <p>
+     * Only <em>configuration</em> is hashed, never the drives or users discovered at runtime. A
+     * signature over discovered domain state would discard every scope's token whenever any single
+     * drive or user appears or disappears, degrading every subsequent run to a full crawl of the
+     * whole domain. Nothing is lost by leaving them out: a scope key with no stored token already
+     * routes to {@link #crawlFullyAndAnchor} in {@link #storeScope}, so a new shared drive or a new
+     * user is crawled in full and anchored on its own, and the token of a scope that disappeared is
+     * simply never read again.
+     * </p>
+     * <p>
+     * No parameter listed in {@link #SECRET_PARAM_KEYS} is an input. The result is written into the
+     * {@code handlerParameter} of the data configuration, which is stored in the config index and
+     * rendered in the admin UI, so a credential must not be derivable from it -- not even through a
+     * hash. The inputs are therefore an explicit allowlist rather than the parameter map minus the
+     * secrets: a later parameter that carries a credential is then excluded by default instead of
+     * being hashed until someone remembers to register it.
+     * </p>
+     *
+     * @param paramMap The parameters for the data store.
+     * @return The signature, as SHA-256 hex.
+     */
+    protected String buildCrawlSignature(final DataStoreParams paramMap) {
+        // getCrawlTarget trims, so " both" and "both" select the very same traversal.
+        final String source = String.join("\n", //
+                CRAWL_TARGET + "=" + paramMap.getAsString(CRAWL_TARGET, TARGET_SHARED_DRIVES).trim(), //
+                IMPERSONATE_USER + "=" + paramMap.getAsString(IMPERSONATE_USER, StringUtil.EMPTY), //
+                USER_QUERY + "=" + paramMap.getAsString(USER_QUERY, StringUtil.EMPTY), //
+                "query=" + paramMap.getAsString("query", StringUtil.EMPTY), //
+                "corpora=" + paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES), //
+                "spaces=" + paramMap.getAsString("spaces", StringUtil.EMPTY));
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(source.getBytes(StandardCharsets.UTF_8)));
+        } catch (final NoSuchAlgorithmException e) {
+            throw new DataStoreException("SHA-256 is not available.", e);
+        }
+    }
+
+    /**
+     * Discards the stored start page tokens when the crawl configuration changed, then records the
+     * new signature.
+     * <p>
+     * Absent, unreadable and mismatched are all treated the same way, because only a signature that
+     * is present and equal proves the tokens describe the current configuration. Discarding is the
+     * safe direction: it costs one full crawl, while a wrong resume is a silent and permanent hole in
+     * the index. It also cannot delete anything, since {@link #store} has already forced
+     * {@code delete_old_docs} to false for every incremental run, so the fallback full crawl
+     * re-indexes without the stale document sweep ever running.
+     * </p>
+     * <p>
+     * Nothing is persisted here. The state is only written back by {@link DriveCrawlState#save()},
+     * which {@link #storeFiles} calls solely when the crawl finished, so a run that was stopped
+     * leaves the previous signature and the previous tokens in place and the next run simply repeats
+     * this decision.
+     * </p>
+     *
+     * @param state The persisted crawl state, or null when the crawl is not incremental.
+     * @param paramMap The parameters for the data store.
+     */
+    protected void applyCrawlSignature(final DriveCrawlState state, final DataStoreParams paramMap) {
+        if (state == null) {
+            return;
+        }
+        final String signature = buildCrawlSignature(paramMap);
+        if (!state.isCompatible(signature)) {
+            logger.info("The crawl configuration changed. Discarding the stored start page tokens and crawling every scope in full.");
+            state.clearTokens();
+        }
+        state.setSignature(signature);
     }
 
     /**

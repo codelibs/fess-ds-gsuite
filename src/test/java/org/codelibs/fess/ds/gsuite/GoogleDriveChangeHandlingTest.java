@@ -184,6 +184,22 @@ public class GoogleDriveChangeHandlingTest extends UnitDsTestCase {
     }
 
     /**
+     * Returns the {@code crawl_signature} line that matches the parameters {@link #runStoreFiles}
+     * crawls with.
+     * <p>
+     * A stored token is only resumed when the signature proves the configuration has not changed
+     * since the token was taken, so a fixture that exercises the change feed has to carry the current
+     * one. A fixture without it is the unsigned state an older configuration is left in, which
+     * deliberately falls back to a full crawl.
+     * </p>
+     *
+     * @return The handler parameter line, without a trailing newline.
+     */
+    protected static String currentSignatureLine() {
+        return DriveCrawlState.CRAWL_SIGNATURE + "=" + new GoogleDriveDataStore().buildCrawlSignature(GSuiteClientApiTest.newParams());
+    }
+
+    /**
      * Runs a legacy scope crawl against the stub client.
      *
      * @param dataStore The data store.
@@ -352,7 +368,8 @@ public class GoogleDriveChangeHandlingTest extends UnitDsTestCase {
         client.feed.add(removed);
 
         try {
-            runStoreFiles(dataStore, newDataConfig("incremental=true\nstart_page_tokens={\"user:legacy\":\"T1\"}"), client);
+            runStoreFiles(dataStore,
+                    newDataConfig("incremental=true\nstart_page_tokens={\"user:legacy\":\"T1\"}\n" + currentSignatureLine()), client);
 
             assertEquals(List.of("getChanges"), client.calls);
             assertEquals("T1", client.requestedPageToken);
@@ -397,7 +414,8 @@ public class GoogleDriveChangeHandlingTest extends UnitDsTestCase {
         client.changesFailure = new DataStoreException("boom");
         client.listedFiles.add(new File().setId("f1"));
         try {
-            runStoreFiles(dataStore, newDataConfig("incremental=true\nstart_page_tokens={\"user:legacy\":\"T1\"}"), client);
+            runStoreFiles(dataStore,
+                    newDataConfig("incremental=true\nstart_page_tokens={\"user:legacy\":\"T1\"}\n" + currentSignatureLine()), client);
 
             assertEquals(List.of("getChanges", "getStartPageToken", "getFiles"), client.calls);
             assertEquals(1, dataStore.processedIds.size());
