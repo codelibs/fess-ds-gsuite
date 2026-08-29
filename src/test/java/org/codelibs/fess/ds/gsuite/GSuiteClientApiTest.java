@@ -18,6 +18,7 @@ package org.codelibs.fess.ds.gsuite;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
@@ -670,6 +671,47 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
         }
         assertEquals(1, failedTargets.size());
         assertEquals("files.list", failedTargets.get(0));
+    }
+
+    /**
+     * about.get must request only the exportFormats field, and the map must be cached per client:
+     * one metadata call per crawl, not one per file. Nothing further is queued on the transport, so
+     * a second request would fail the test on its own.
+     */
+    @Test
+    public void test_getExportFormats_readsAndCaches() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"exportFormats\":{\"application/vnd.google-apps.document\":[\"text/markdown\",\"text/plain\"]}}");
+        try (GSuiteClient client = newClient(newParams(), mockTransport)) {
+            assertEquals(List.of("text/markdown", "text/plain"), client.getExportFormats().get("application/vnd.google-apps.document"));
+            client.getExportFormats();
+            client.getExportFormats();
+        }
+        final List<String> urls = mockTransport.getRequestedUrls();
+        assertEquals("about.get is called exactly once", 1, urls.size());
+        assertTrue(urls.get(0), urls.get(0).contains("/drive/v3/about"));
+        assertTrue(urls.get(0), urls.get(0).contains("fields=exportFormats"));
+    }
+
+    /**
+     * A failing about.get must not abort the crawl, and must not degrade into an empty map either:
+     * an empty map means "nothing can be exported", which would silently drop the content of every
+     * Google Doc, Sheet and Slide in the domain. The static fallback keeps them indexed.
+     */
+    @Test
+    public void test_getExportFormats_failureFallsBackToTheStaticMap() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        queueError(mockTransport, 403, "{\"error\":{\"code\":403,\"errors\":[{\"reason\":\"insufficientPermissions\","
+                + "\"message\":\"Insufficient permissions\"}],\"message\":\"Insufficient permissions\"}}");
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            final Map<String, List<String>> formats = client.getExportFormats();
+            assertFalse("an empty map would silently strip the content of every native document", formats.isEmpty());
+            assertEquals(GSuiteClient.FALLBACK_EXPORT_FORMATS, formats);
+            assertTrue(formats.toString(), formats.get("application/vnd.google-apps.document").contains("text/plain"));
+            assertNull("a form still has no export target", formats.get("application/vnd.google-apps.form"));
+            client.getExportFormats();
+        }
+        assertEquals("the failure is cached, so about.get is not retried once per file", 1, mockTransport.getRequestedUrls().size());
     }
 
     /** Two per-user clients must not share anything that binds a request to one of them. */

@@ -254,11 +254,11 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     }
 
     @Test
-    public void testGoogleAppsMimeTypePattern() {
-        assertNotNull(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN);
-        assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.document").matches());
-        assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.spreadsheet").matches());
-        assertFalse(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/pdf").matches());
+    public void testGoogleAppsMimeTypePrefix() {
+        assertEquals("application/vnd.google-apps.", GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PREFIX);
+        assertTrue("application/vnd.google-apps.document".startsWith(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PREFIX));
+        assertTrue("application/vnd.google-apps.spreadsheet".startsWith(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PREFIX));
+        assertFalse("application/pdf".startsWith(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PREFIX));
     }
 
     // Note: buildFileMap() tests are omitted as they require integration test environment

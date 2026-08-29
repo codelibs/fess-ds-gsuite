@@ -28,8 +28,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.apache.logging.log4j.LogManager;
@@ -72,8 +70,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     /** Default thread pool termination timeout in seconds. */
     protected static final long DEFAULT_THREAD_POOL_TIMEOUT_SECONDS = 60L;
 
-    /** Pattern for matching Google Apps MIME types. */
-    protected static final Pattern GOOGLE_APPS_MIMETYPE_PATTERN = Pattern.compile("application/vnd\\.google-apps\\.(.*)");
+    /** Mime type prefix shared by every native Google type, none of which can be downloaded with alt=media. */
+    protected static final String GOOGLE_APPS_MIMETYPE_PREFIX = "application/vnd.google-apps.";
+
+    /**
+     * The export targets preferred for each native Google type, most preferred first. Only a target
+     * that actually appears in the live exportFormats map is used, so this table never forces an
+     * unsupported conversion.
+     */
+    protected static final Map<String, List<String>> PREFERRED_EXPORT_MIMETYPES = Map.of(//
+            GOOGLE_APPS_MIMETYPE_PREFIX + "document", List.of("text/markdown", "text/plain", "text/html"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "spreadsheet", List.of("text/tab-separated-values", "text/csv"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "presentation", List.of("text/plain"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "drawing", List.of("image/png"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "script", List.of("application/vnd.google-apps.script+json"));
+
+    /** The Apps Script export target, whose payload is a JSON bundle rather than text. */
+    protected static final String SCRIPT_EXPORT_MIMETYPE = "application/vnd.google-apps.script+json";
 
     // parameters
     /** Parameter key for the maximum file size. */
@@ -1069,12 +1082,69 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Chooses the export target for a native Google type.
+     * <p>
+     * Google Forms and Google Sites have no row in {@code exportFormats} at all, so this returns null
+     * for them and the caller indexes the metadata only. Falling through to {@code alt=media} for a
+     * native type always fails, which is what the previous implementation did on every crawl (D-16).
+     * </p>
+     *
+     * @param mimeType The source mime type.
+     * @param exportFormats The live export format map from about.get.
+     * @return The export target mime type, or null when the type cannot be exported.
+     */
+    protected String selectExportMimeType(final String mimeType, final Map<String, List<String>> exportFormats) {
+        if (exportFormats == null) {
+            return null;
+        }
+        final List<String> supported = exportFormats.get(mimeType);
+        if (supported == null || supported.isEmpty()) {
+            return null;
+        }
+        for (final String preferred : PREFERRED_EXPORT_MIMETYPES.getOrDefault(mimeType, List.of())) {
+            if (supported.contains(preferred)) {
+                return preferred;
+            }
+        }
+        return supported.get(0);
+    }
+
+    /**
+     * Flattens the Apps Script JSON bundle into "file name then source" for each script file.
+     * Malformed JSON yields an empty string rather than aborting the file.
+     *
+     * @param json The exported Apps Script bundle.
+     * @return The indexable text.
+     */
+    protected String extractScriptSource(final String json) {
+        final StringBuilder sb = new StringBuilder();
+        try {
+            final Map<String, Object> map = new ObjectMapper().readValue(json, new TypeReference<Map<String, Object>>() {
+            });
+            if (map.containsKey("files")) {
+                @SuppressWarnings("unchecked")
+                final List<Map<String, Object>> files = (List<Map<String, Object>>) map.get("files");
+                files.forEach(f -> {
+                    sb.append(f.getOrDefault("name", StringUtil.EMPTY));
+                    sb.append('\n');
+                    sb.append(f.getOrDefault("source", StringUtil.EMPTY));
+                    sb.append('\n');
+                });
+            }
+        } catch (final Exception e) {
+            logger.warn("Failed to parse an Apps Script bundle.", e);
+        }
+        return sb.toString();
+    }
+
+    /**
      * Returns the contents of a file.
-     * Handles different file types appropriately:
-     * - Google Docs/Presentations: exported as plain text
-     * - Google Sheets: exported as CSV
-     * - Google Apps Script: JSON parsed to extract script source code
-     * - Other files: extracted using Tika extractor
+     * <p>
+     * A native Google type is exported, with the target chosen from the live
+     * {@code exportFormats} map rather than from a hardcoded switch; a type with no target at all,
+     * such as a Form or a Site, yields an empty string and is indexed with its metadata only.
+     * Anything else is downloaded and handed to the Tika extractor.
+     * </p>
      * @param client The GSuiteClient.
      * @param file The file.
      * @param ignoreError Whether to ignore errors.
@@ -1084,45 +1154,25 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String mimeType = file.getMimeType();
         final String id = file.getId();
 
-        // Check if this is a Google Apps file (e.g., application/vnd.google-apps.document)
-        final Matcher m = GOOGLE_APPS_MIMETYPE_PATTERN.matcher(mimeType);
-        if (m.matches()) {
-            final String appType = m.group(1); // Extract the app type (e.g., "document", "spreadsheet")
-            switch (appType) {
-            case "document":
-            case "presentation":
-                // Export Google Docs and Presentations as plain text
-                return client.extractFileText(id, "text/plain");
-            case "spreadsheet":
-                // Export Google Sheets as CSV format
-                return client.extractFileText(id, "text/csv");
-            case "script":
-                // Google Apps Script files are exported as JSON
-                // Parse the JSON to extract script file names and source code
-                final String text = client.extractFileText(id, "application/vnd.google-apps.script+json");
-                final StringBuilder sb = new StringBuilder();
-                try {
-                    final Map<String, Object> map = new ObjectMapper().readValue(text, new TypeReference<Map<String, Object>>() {
-                    });
-                    if (map.containsKey("files")) {
-                        @SuppressWarnings("unchecked")
-                        final List<Map<String, Object>> files = (List<Map<String, Object>>) map.get("files");
-                        // Concatenate file names and their source code for indexing
-                        files.forEach(f -> {
-                            sb.append(f.getOrDefault("name", StringUtil.EMPTY));
-                            sb.append("\n");
-                            sb.append(f.getOrDefault("source", StringUtil.EMPTY));
-                            sb.append("\n");
-                        });
-                    }
-                } catch (final Exception e) {
-                    logger.warn("Failed to parse a json content.", e);
+        // Native Google types must be exported; alt=media never works for them. A type that has no
+        // export target at all (Forms, Sites) is not a failure, so it must not be reported as one:
+        // a domain full of Forms would fill the admin failure list on every crawl.
+        if (mimeType != null && mimeType.startsWith(GOOGLE_APPS_MIMETYPE_PREFIX)) {
+            final String exportMimeType = selectExportMimeType(mimeType, client.getExportFormats());
+            if (exportMimeType == null) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("No export format for {} ({}). Indexing the metadata only.", file.getName(), mimeType);
                 }
-                return sb.toString();
-            default:
-                // Other Google Apps file types (forms, drawings, etc.) are not explicitly handled
-                break;
+                return StringUtil.EMPTY;
             }
+            if (SCRIPT_EXPORT_MIMETYPE.equals(exportMimeType)) {
+                return extractScriptSource(client.extractFileText(id, exportMimeType));
+            }
+            if (exportMimeType.startsWith("image/")) {
+                // Drawings only export as an image; there is no text to index.
+                return StringUtil.EMPTY;
+            }
+            return client.extractFileText(id, exportMimeType);
         }
 
         try (final InputStream in = client.getFileInputStream(id)) {

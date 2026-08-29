@@ -68,6 +68,7 @@ import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.BackOff;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.model.About;
 import com.google.api.services.drive.model.DriveList;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
@@ -200,6 +201,23 @@ public class GSuiteClient implements AutoCloseable {
      */
     protected static final Set<String> RETRYABLE_403_REASONS = Set.of("userRateLimitExceeded", "rateLimitExceeded");
 
+    /**
+     * The export targets assumed when {@code about.get} cannot be read.
+     * <p>
+     * These are the conversions Drive v3 has always offered, so falling back to them keeps every
+     * native Google document indexed with its content. An empty map would instead drop the content
+     * of every Doc, Sheet and Slide of the domain without a single error per file, and failing hard
+     * would abort the whole crawl over one metadata call. Google Forms and Google Sites are absent
+     * on purpose: they have no export format at all and are indexed with metadata only.
+     * </p>
+     */
+    protected static final Map<String, List<String>> FALLBACK_EXPORT_FORMATS = Map.of(//
+            "application/vnd.google-apps.document", List.of("text/plain"), //
+            "application/vnd.google-apps.spreadsheet", List.of("text/csv"), //
+            "application/vnd.google-apps.presentation", List.of("text/plain"), //
+            "application/vnd.google-apps.drawing", List.of("image/png"), //
+            "application/vnd.google-apps.script", List.of("application/vnd.google-apps.script+json"));
+
     /** The Google Drive client. */
     protected Drive drive;
     /** The HTTP transport. */
@@ -231,6 +249,9 @@ public class GSuiteClient implements AutoCloseable {
 
     /** The page size of permissions.list and drives.list. */
     protected int permissionPageSize = DEFAULT_PERMISSION_PAGE_SIZE;
+
+    /** The cached source mime type to export target map returned by about.get. */
+    protected volatile Map<String, List<String>> exportFormats;
 
     /**
      * Invoked when a listing fails permanently. The default only logs; the data store replaces it
@@ -852,6 +873,43 @@ public class GSuiteClient implements AutoCloseable {
         client.setApplicationName(applicationName);
         client.setFailureHandler(failureHandler);
         return client;
+    }
+
+    /**
+     * Returns the live "source mime type to export targets" map from
+     * {@code about.get?fields=exportFormats}.
+     * <p>
+     * The map is fetched once per client and cached, so the crawl spends one metadata call rather
+     * than one per file. A failure is not fatal and does not yield an empty map either: it falls
+     * back to {@link #FALLBACK_EXPORT_FORMATS} so native Google documents keep their content, and
+     * the fallback is cached like a successful answer so a broken about.get is not retried per file.
+     * </p>
+     *
+     * @return The export formats. Never null and never empty.
+     */
+    public Map<String, List<String>> getExportFormats() {
+        final Map<String, List<String>> cached = exportFormats;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (this) {
+            if (exportFormats != null) {
+                return exportFormats;
+            }
+            Map<String, List<String>> formats = null;
+            try {
+                final About about = executeWithRetry("about.get", () -> getDrive().about().get().setFields("exportFormats").execute());
+                formats = about.getExportFormats();
+            } catch (final IOException e) {
+                if (e.getCause() instanceof final InterruptedException ie) {
+                    // A stop request must stop the crawl, not silently downgrade it to the fallback.
+                    throw new InterruptedRuntimeException(ie);
+                }
+                logger.warn("Failed to read the export formats. Falling back to the conversions Drive has always supported.", e);
+            }
+            exportFormats = formats == null || formats.isEmpty() ? FALLBACK_EXPORT_FORMATS : formats;
+            return exportFormats;
+        }
     }
 
     /**
