@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -46,10 +47,15 @@ import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 
 import com.google.api.client.googleapis.GoogleUtils;
+import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpRequestFactory;
 import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.HttpResponse;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport.Builder;
+import com.google.api.client.json.GenericJson;
+import com.google.api.client.json.JsonObjectParser;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
@@ -132,6 +138,18 @@ public class GSuiteClient implements AutoCloseable {
 
     /** The field projection used by drives.list. */
     protected static final String DRIVE_FIELDS = "nextPageToken,drives(id,name)";
+
+    /** The Admin SDK Directory endpoint that lists users. */
+    protected static final String ADMIN_DIRECTORY_USERS_URL = "https://admin.googleapis.com/admin/directory/v1/users";
+
+    /** The customer alias that resolves to the account of the impersonated administrator. */
+    protected static final String ADMIN_CUSTOMER = "my_customer";
+
+    /** The maximum page size accepted by Admin SDK users.list. The API caps this at 500. */
+    protected static final int ADMIN_MAX_RESULTS = 500;
+
+    /** The field projection used by Admin SDK users.list. */
+    protected static final String ADMIN_USER_FIELDS = "nextPageToken,users(primaryEmail)";
 
     /** The Google Drive client. */
     protected Drive drive;
@@ -510,6 +528,94 @@ public class GSuiteClient implements AutoCloseable {
         } catch (final IOException e) {
             throw new DataStoreException("Failed to access files in a shared drive: " + driveId, e);
         }
+    }
+
+    /**
+     * Lists the primary email address of every user of the domain through the Admin SDK Directory API.
+     * <p>
+     * Implemented as a plain REST call so that {@code google-api-services-admin-directory} does not
+     * have to become a dependency: {@code users.list} is a single GET. The response is parsed with
+     * the same {@link GsonFactory} the Drive service already uses, so no second JSON stack is pulled in.
+     * <p>
+     * The caller must be impersonating an administrator and the credentials must carry
+     * {@link #ADMIN_DIRECTORY_USER_READONLY_SCOPE}, which is not part of {@link #DEFAULT_SCOPES}.
+     *
+     * @param userQuery The Admin SDK {@code query} used to narrow the users down, or null.
+     * @return The primary email addresses. Never null, but possibly empty.
+     */
+    public List<String> listUsers(final String userQuery) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("userQuery: {}", userQuery);
+        }
+        final List<String> userList = new ArrayList<>();
+        final HttpRequestFactory requestFactory = createAdminRequestFactory();
+        final JsonObjectParser parser = new JsonObjectParser(GsonFactory.getDefaultInstance());
+        String pageToken = null;
+        try {
+            do {
+                final GenericUrl url = new GenericUrl(ADMIN_DIRECTORY_USERS_URL);
+                url.put("customer", ADMIN_CUSTOMER);
+                url.put("maxResults", Integer.toString(ADMIN_MAX_RESULTS));
+                url.put("projection", "basic");
+                url.put("fields", ADMIN_USER_FIELDS);
+                if (StringUtil.isNotBlank(userQuery)) {
+                    url.put("query", userQuery);
+                }
+                if (pageToken != null) {
+                    url.put("pageToken", pageToken);
+                }
+                final HttpResponse response = requestFactory.buildGetRequest(url).setParser(parser).execute();
+                try {
+                    final GenericJson json = response.parseAs(GenericJson.class);
+                    pageToken = json == null ? null : collectUserEmails(json, userList);
+                } finally {
+                    response.disconnect();
+                }
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to list users of the domain.", e);
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("users: {}", userList.size());
+        }
+        return userList;
+    }
+
+    /**
+     * Appends the primary email address of every user of one {@code users.list} page to the given list.
+     * <p>
+     * The page is parsed untyped, so a user without {@code primaryEmail} is skipped rather than
+     * added as a null entry.
+     *
+     * @param json One page of the {@code users.list} response.
+     * @param userList The list to append the email addresses to.
+     * @return The token of the next page, or null if this was the last page.
+     */
+    protected static String collectUserEmails(final GenericJson json, final List<String> userList) {
+        if (json.get("users") instanceof final List<?> users) {
+            for (final Object user : users) {
+                if (user instanceof final Map<?, ?> userMap) {
+                    final Object email = userMap.get("primaryEmail");
+                    if (email != null) {
+                        userList.add(email.toString());
+                    }
+                }
+            }
+        }
+        final Object nextPageToken = json.get("nextPageToken");
+        return nextPageToken != null ? nextPageToken.toString() : null;
+    }
+
+    /**
+     * Creates the request factory used for Admin SDK calls.
+     * <p>
+     * Reuses {@link #requestInitializer}, so an Admin SDK request carries the same credentials and
+     * the same read and connect timeouts as a Drive request. Exists as an override point for tests.
+     *
+     * @return The request factory.
+     */
+    protected HttpRequestFactory createAdminRequestFactory() {
+        return httpTransport.createRequestFactory(requestInitializer);
     }
 
     /**

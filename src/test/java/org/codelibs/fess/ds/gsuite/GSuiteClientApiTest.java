@@ -21,6 +21,7 @@ import java.util.List;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.junit.jupiter.api.Test;
 
+import com.google.api.client.http.HttpRequestFactory;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.drive.Drive;
@@ -221,6 +222,93 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
             client.getFilesInDrive("drive1", null, null, (final File file) -> fileIds.add(file.getId()));
             assertTrue(fileIds.isEmpty());
             assertEquals(1, transport.getRequestedUrls().size());
+        }
+    }
+
+    @Test
+    public void test_listUsers_paginatesAdminDirectory() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"nextPageToken\":\"U2\",\"users\":[{\"primaryEmail\":\"a@example.com\"}]}");
+        mockTransport.queueJson("{\"users\":[{\"primaryEmail\":\"b@example.com\"}]}");
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport) {
+            @Override
+            protected HttpRequestFactory createAdminRequestFactory() {
+                return mockTransport.createRequestFactory(request -> {
+                    // no credentials in tests
+                });
+            }
+        }) {
+            final List<String> users = client.listUsers("orgUnitPath=/Sales");
+            assertEquals(2, users.size());
+            assertEquals("a@example.com", users.get(0));
+            assertEquals("b@example.com", users.get(1));
+            final List<String> urls = mockTransport.getRequestedUrls();
+            assertEquals(2, urls.size());
+            assertTrue(urls.get(0), urls.get(0).contains("admin/directory/v1/users"));
+            assertTrue(urls.get(0), urls.get(0).contains("customer=my_customer"));
+            assertTrue(urls.get(0), urls.get(0).contains("maxResults=500"));
+            assertTrue(urls.get(0), urls.get(0).contains("query=orgUnitPath"));
+            assertTrue(urls.get(0), !urls.get(0).contains("pageToken="));
+            assertTrue(urls.get(1), urls.get(1).contains("pageToken=U2"));
+        }
+    }
+
+    @Test
+    public void test_listUsers_withoutQuery() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"users\":[{\"primaryEmail\":\"a@example.com\"}]}");
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport) {
+            @Override
+            protected HttpRequestFactory createAdminRequestFactory() {
+                return mockTransport.createRequestFactory(request -> {
+                    // no credentials in tests
+                });
+            }
+        }) {
+            final List<String> users = client.listUsers(null);
+            assertEquals(1, users.size());
+            assertEquals("a@example.com", users.get(0));
+            final List<String> urls = mockTransport.getRequestedUrls();
+            assertEquals(1, urls.size());
+            assertFalse(urls.get(0), urls.get(0).contains("query="));
+        }
+    }
+
+    @Test
+    public void test_listUsers_emptyResponse() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{}");
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport) {
+            @Override
+            protected HttpRequestFactory createAdminRequestFactory() {
+                return mockTransport.createRequestFactory(request -> {
+                    // no credentials in tests
+                });
+            }
+        }) {
+            final List<String> users = client.listUsers(null);
+            assertNotNull(users);
+            assertTrue(users.isEmpty());
+            assertEquals(1, mockTransport.getRequestedUrls().size());
+        }
+    }
+
+    /** A user without a primary email address must not become a blank entry in the result. */
+    @Test
+    public void test_listUsers_skipsUserWithoutPrimaryEmail() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"users\":[{\"id\":\"1\"},{\"primaryEmail\":\"a@example.com\"}]}");
+        try (GSuiteClient client = new GSuiteClient(newParams(), mockTransport) {
+            @Override
+            protected HttpRequestFactory createAdminRequestFactory() {
+                return mockTransport.createRequestFactory(request -> {
+                    // no credentials in tests
+                });
+            }
+        }) {
+            final List<String> users = client.listUsers(null);
+            assertEquals(1, users.size());
+            assertEquals("a@example.com", users.get(0));
         }
     }
 }
