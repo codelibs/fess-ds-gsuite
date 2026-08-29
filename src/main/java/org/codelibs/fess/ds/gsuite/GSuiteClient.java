@@ -92,6 +92,8 @@ public class GSuiteClient implements AutoCloseable {
     protected static final String IMPERSONATE_USER = "impersonate_user";
     /** Default OAuth scopes. Read-only, unlike the previous hardcoded read-write scope. */
     protected static final String DEFAULT_SCOPES = "https://www.googleapis.com/auth/drive.readonly";
+    /** The Admin SDK scope that {@code admin/directory/v1/users} requires. Not part of {@link #DEFAULT_SCOPES}. */
+    protected static final String ADMIN_DIRECTORY_USER_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.directory.user.readonly";
 
     /** Constant for all drives. */
     public static final String ALL_DRIVES = "allDrives";
@@ -204,15 +206,29 @@ public class GSuiteClient implements AutoCloseable {
     }
 
     /**
-     * Returns the OAuth scopes.
+     * Returns the OAuth scopes of this client.
+     *
+     * @return The OAuth scopes.
+     * @see #resolveScopes(DataStoreParams)
+     */
+    protected Collection<String> getScopes() {
+        return resolveScopes(params);
+    }
+
+    /**
+     * Resolves the OAuth scopes carried by the given parameters.
      * A blank (absent, empty, or whitespace-only) {@link #SCOPES} parameter falls back to
      * {@link #DEFAULT_SCOPES}. If the parameter is present and non-blank but, after splitting on
      * commas, trimming, and dropping blank entries, yields no usable scope (e.g. {@code ","}),
      * a {@link DataStoreException} is thrown instead of silently returning an empty collection.
+     * <p>
+     * This is the single resolution a caller must validate against before assuming a scope is
+     * granted, since the raw parameter value is neither trimmed nor split.
      *
+     * @param params The data store parameters.
      * @return The OAuth scopes.
      */
-    protected Collection<String> getScopes() {
+    protected static Collection<String> resolveScopes(final DataStoreParams params) {
         final String rawScopes = params.getAsString(SCOPES);
         final String scopesValue = StringUtil.isBlank(rawScopes) ? DEFAULT_SCOPES : rawScopes;
         final Collection<String> scopes =

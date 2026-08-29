@@ -46,6 +46,7 @@ import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
+import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
@@ -117,6 +118,22 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * crawl may run several clients.
      */
     protected static final String PERMISSION_RESOLVERS = "permission_resolvers";
+
+    /** Parameter key for the crawl target. */
+    protected static final String CRAWL_TARGET = "crawl_target";
+    /** Parameter key for the administrator account to impersonate. */
+    protected static final String IMPERSONATE_USER = "impersonate_user";
+    /** Parameter key for the Admin SDK user query. */
+    protected static final String USER_QUERY = "user_query";
+
+    /** Crawl target that keeps the pre-15.9 behaviour of the service account's own view. */
+    protected static final String TARGET_LEGACY = "legacy";
+    /** Crawl target that walks every shared drive of the domain. */
+    protected static final String TARGET_SHARED_DRIVES = "shared_drives";
+    /** Crawl target that walks the My Drive of every directory user. */
+    protected static final String TARGET_USERS = "users";
+    /** Crawl target that walks both shared drives and every user's My Drive. */
+    protected static final String TARGET_BOTH = "both";
 
     /**
      * Parameter keys that carry service account credentials and must never reach the script
@@ -259,6 +276,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
 
         final Map<String, Object> configMap = new HashMap<>();
+        configMap.put(CRAWL_TARGET, getCrawlTarget(paramMap));
         configMap.put(MAX_SIZE, getMaxSize(paramMap));
         configMap.put(IGNORE_FOLDER, isIgnoreFolder(paramMap));
         configMap.put(IGNORE_ERROR, isIgnoreError(paramMap));
@@ -359,6 +377,44 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected String[] getSupportedMimeTypes(final DataStoreParams paramMap) {
         return StreamUtil.split(paramMap.getAsString(SUPPORTED_MIMETYPES, ".*"), ",")
                 .get(stream -> stream.map(String::trim).toArray(n -> new String[n]));
+    }
+
+    /**
+     * Returns the validated crawl target.
+     * <p>
+     * Every target other than {@code legacy} relies on {@code useDomainAdminAccess}, which the Drive
+     * API only grants to a Google Workspace domain administrator. A service account is not one by
+     * itself: it has to impersonate an administrator through domain-wide delegation. A missing
+     * {@code impersonate_user} therefore fails the crawl at startup rather than silently indexing
+     * zero files.
+     * <p>
+     * {@code users} and {@code both} additionally enumerate the directory through
+     * {@code admin/directory/v1/users}, which needs
+     * {@link GSuiteClient#ADMIN_DIRECTORY_USER_READONLY_SCOPE}. That scope is not part of
+     * {@link GSuiteClient#DEFAULT_SCOPES}, so without it the combination can only fail with an
+     * opaque 403 once the crawl has already begun. It is rejected here instead.
+     *
+     * @param paramMap The parameters for the data store.
+     * @return One of {@code legacy}, {@code shared_drives}, {@code users} or {@code both}.
+     */
+    protected String getCrawlTarget(final DataStoreParams paramMap) {
+        final String crawlTarget = paramMap.getAsString(CRAWL_TARGET, TARGET_SHARED_DRIVES).trim();
+        if (!TARGET_LEGACY.equals(crawlTarget) && !TARGET_SHARED_DRIVES.equals(crawlTarget) && !TARGET_USERS.equals(crawlTarget)
+                && !TARGET_BOTH.equals(crawlTarget)) {
+            throw new DataStoreException("parameter '" + CRAWL_TARGET + "' must be one of '" + TARGET_LEGACY + "', '" + TARGET_SHARED_DRIVES
+                    + "', '" + TARGET_USERS + "' or '" + TARGET_BOTH + "': " + crawlTarget);
+        }
+        if (!TARGET_LEGACY.equals(crawlTarget) && StringUtil.isBlank(paramMap.getAsString(IMPERSONATE_USER))) {
+            throw new DataStoreException(
+                    "parameter '" + IMPERSONATE_USER + "' is required when '" + CRAWL_TARGET + "' is not '" + TARGET_LEGACY + "'.");
+        }
+        if ((TARGET_USERS.equals(crawlTarget) || TARGET_BOTH.equals(crawlTarget))
+                && !GSuiteClient.resolveScopes(paramMap).contains(GSuiteClient.ADMIN_DIRECTORY_USER_READONLY_SCOPE)) {
+            throw new DataStoreException(
+                    "parameter '" + GSuiteClient.SCOPES + "' must include '" + GSuiteClient.ADMIN_DIRECTORY_USER_READONLY_SCOPE + "' when '"
+                            + CRAWL_TARGET + "' is '" + TARGET_USERS + "' or '" + TARGET_BOTH + "'.");
+        }
+        return crawlTarget;
     }
 
     /**
