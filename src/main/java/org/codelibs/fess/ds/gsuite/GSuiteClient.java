@@ -26,9 +26,11 @@ import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.List;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -51,9 +53,10 @@ import com.google.api.client.http.javanet.NetHttpTransport.Builder;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
-import com.google.api.services.drive.Drive.Files.List;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
+import com.google.api.services.drive.model.Permission;
+import com.google.api.services.drive.model.PermissionList;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
@@ -110,6 +113,13 @@ public class GSuiteClient implements AutoCloseable {
 
     /** Pattern for cleaning up PEM-encoded private keys (removes headers, footers, and newlines). */
     protected static final String PEM_CLEANUP_PATTERN = "\\\\n|\\n|-----[A-Z ]+-----";
+
+    /** The maximum page size accepted by permissions.list. The API caps this at 100. */
+    protected static final int PERMISSION_PAGE_SIZE_LIMIT = 100;
+
+    /** The field projection used by permissions.list. */
+    protected static final String PERMISSION_FIELDS =
+            "nextPageToken,permissions(id,type,role,emailAddress,domain,deleted,allowFileDiscovery,permissionDetails)";
 
     /** The Google Drive client. */
     protected Drive drive;
@@ -327,7 +337,7 @@ public class GSuiteClient implements AutoCloseable {
         String pageToken = null;
         try {
             do {
-                final List list = getDrive().files().list().setPageToken(pageToken);
+                final Drive.Files.List list = getDrive().files().list().setPageToken(pageToken);
                 if (StringUtil.isNotBlank(q)) {
                     list.setQ(q);
                 }
@@ -360,6 +370,43 @@ public class GSuiteClient implements AutoCloseable {
         } catch (final IOException e) {
             throw new DataStoreException("Failed to access files.", e);
         }
+    }
+
+    /**
+     * Retrieves every permission of a file or of a shared drive, following pagination.
+     * <p>
+     * {@code useDomainAdminAccess} is only honoured by the Drive API when {@code fileId} refers to a
+     * shared drive and the caller is a domain administrator. Pass {@code false} for an ordinary file ID.
+     *
+     * @param fileId The file ID or the shared drive ID.
+     * @param useDomainAdminAccess Whether to issue the request as a domain administrator.
+     * @return The permissions. Never null, but possibly empty.
+     */
+    public List<Permission> getPermissions(final String fileId, final boolean useDomainAdminAccess) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("fileId: {}, useDomainAdminAccess: {}", fileId, useDomainAdminAccess);
+        }
+        final List<Permission> permissionList = new ArrayList<>();
+        String pageToken = null;
+        try {
+            do {
+                final Drive.Permissions.List list = getDrive().permissions()
+                        .list(fileId)
+                        .setSupportsAllDrives(Boolean.TRUE)
+                        .setUseDomainAdminAccess(Boolean.valueOf(useDomainAdminAccess))
+                        .setPageSize(Integer.valueOf(PERMISSION_PAGE_SIZE_LIMIT))
+                        .setFields(PERMISSION_FIELDS)
+                        .setPageToken(pageToken);
+                final PermissionList result = list.execute();
+                if (result.getPermissions() != null) {
+                    permissionList.addAll(result.getPermissions());
+                }
+                pageToken = result.getNextPageToken();
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to access permissions of " + fileId + ".", e);
+        }
+        return permissionList;
     }
 
     /**
