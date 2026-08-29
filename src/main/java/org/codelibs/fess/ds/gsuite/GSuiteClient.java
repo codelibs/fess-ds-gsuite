@@ -32,6 +32,8 @@ import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -47,16 +49,21 @@ import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 
 import com.google.api.client.googleapis.GoogleUtils;
+import com.google.api.client.googleapis.json.GoogleJsonError;
+import com.google.api.client.googleapis.json.GoogleJsonResponseException;
 import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpHeaders;
 import com.google.api.client.http.HttpRequestFactory;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.HttpResponse;
+import com.google.api.client.http.HttpResponseException;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport.Builder;
 import com.google.api.client.json.GenericJson;
 import com.google.api.client.json.JsonObjectParser;
 import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.client.util.BackOff;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.DriveList;
@@ -154,6 +161,28 @@ public class GSuiteClient implements AutoCloseable {
     /** The field projection used by Admin SDK users.list. */
     protected static final String ADMIN_USER_FIELDS = "nextPageToken,users(primaryEmail)";
 
+    /** Parameter key for the maximum number of retries of a throttled Drive API call. */
+    protected static final String MAX_RETRIES = "max_retries";
+    /** Parameter key for the initial wait of the exponential back-off, in milliseconds. */
+    protected static final String RETRY_INITIAL_INTERVAL_MS = "retry_initial_interval_ms";
+    /** Parameter key for the upper bound of the exponential back-off, in milliseconds. */
+    protected static final String MAX_BACKOFF_MS = "max_backoff_ms";
+
+    /** Default number of retries. */
+    protected static final int DEFAULT_MAX_RETRIES = 5;
+    /** Default initial wait of the exponential back-off, in milliseconds. */
+    protected static final int DEFAULT_RETRY_INITIAL_INTERVAL_MS = 1000;
+    /** Default upper bound of the exponential back-off, in milliseconds. */
+    protected static final int DEFAULT_MAX_BACKOFF_MS = 32000;
+    /** Upper bound of the additive jitter recommended by Google, in milliseconds. */
+    protected static final int MAX_JITTER_MS = 1000;
+
+    /**
+     * The 403 error reasons that mean "slow down" rather than "you may not do this".
+     * A 403 with any other reason is a permanent authorization failure and is never retried.
+     */
+    protected static final Set<String> RETRYABLE_403_REASONS = Set.of("userRateLimitExceeded", "rateLimitExceeded");
+
     /** The Google Drive client. */
     protected Drive drive;
     /** The HTTP transport. */
@@ -172,6 +201,13 @@ public class GSuiteClient implements AutoCloseable {
     protected int readTimeout = DEFAULT_READ_TIMEOUT_MS;
     /** The connect timeout in milliseconds. */
     protected int connectTimeout = DEFAULT_CONNECT_TIMEOUT_MS;
+
+    /** The maximum number of retries of a throttled Drive API call. */
+    protected int maxRetries = DEFAULT_MAX_RETRIES;
+    /** The initial wait of the exponential back-off, in milliseconds. */
+    protected int retryInitialIntervalMillis = DEFAULT_RETRY_INITIAL_INTERVAL_MS;
+    /** The upper bound of the exponential back-off, in milliseconds. */
+    protected int maxBackOffMillis = DEFAULT_MAX_BACKOFF_MS;
 
     /** The name of the application. */
     protected String applicationName = "Fess DataStore";
@@ -209,6 +245,9 @@ public class GSuiteClient implements AutoCloseable {
         if (StringUtil.isNotBlank(params.getAsString(REFRESH_TOKEN_INTERVAL))) {
             logger.warn("{} is no longer used. Access tokens are refreshed by google-auth-library.", REFRESH_TOKEN_INTERVAL);
         }
+        maxRetries = getIntParam(params, MAX_RETRIES, DEFAULT_MAX_RETRIES);
+        retryInitialIntervalMillis = getIntParam(params, RETRY_INITIAL_INTERVAL_MS, DEFAULT_RETRY_INITIAL_INTERVAL_MS);
+        maxBackOffMillis = getIntParam(params, MAX_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
         credentials = createCredentials();
         requestInitializer = createRequestInitializer(credentials);
     }
@@ -698,6 +737,258 @@ public class GSuiteClient implements AutoCloseable {
      */
     protected Drive.Files.Get newFileGetRequest(final String id) throws IOException {
         return getDrive().files().get(id).setSupportsAllDrives(Boolean.TRUE);
+    }
+
+    /**
+     * Reads an integer parameter, falling back to a default when it is blank or malformed.
+     *
+     * @param params The data store parameters.
+     * @param key The parameter key.
+     * @param defaultValue The value used when the parameter is absent or not a number.
+     * @return The parameter value.
+     */
+    protected static int getIntParam(final DataStoreParams params, final String key, final int defaultValue) {
+        final String value = params.getAsString(key);
+        if (StringUtil.isBlank(value)) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (final NumberFormatException e) {
+            logger.warn("Invalid {}: {}. Using {}.", key, value, Integer.valueOf(defaultValue));
+            return defaultValue;
+        }
+    }
+
+    /**
+     * An exponential back-off that follows the wait interval Google documents for the Drive API:
+     * {@code min((2^n) * initialInterval + random(0, 1000), maxBackOff)}.
+     * The jitter is additive, unlike {@code com.google.api.client.util.ExponentialBackOff}, whose
+     * jitter is multiplicative.
+     */
+    protected static class GoogleBackOff implements BackOff {
+
+        /** The maximum number of retries before {@link BackOff#STOP} is returned. */
+        protected final int maxRetries;
+        /** The initial wait, in milliseconds. */
+        protected final long initialIntervalMillis;
+        /** The upper bound of a single wait, in milliseconds. */
+        protected final long maxBackOffMillis;
+        /** The source of the additive jitter. */
+        protected final Random random;
+        /** The number of retries already handed out. */
+        protected int retryCount;
+
+        /**
+         * Constructs a new GoogleBackOff.
+         *
+         * @param maxRetries The maximum number of retries.
+         * @param initialIntervalMillis The initial wait, in milliseconds.
+         * @param maxBackOffMillis The upper bound of a single wait, in milliseconds.
+         * @param random The source of the additive jitter.
+         */
+        protected GoogleBackOff(final int maxRetries, final long initialIntervalMillis, final long maxBackOffMillis, final Random random) {
+            this.maxRetries = maxRetries;
+            this.initialIntervalMillis = initialIntervalMillis;
+            this.maxBackOffMillis = maxBackOffMillis;
+            this.random = random;
+        }
+
+        @Override
+        public void reset() {
+            retryCount = 0;
+        }
+
+        @Override
+        public long nextBackOffMillis() {
+            if (retryCount >= maxRetries) {
+                return BackOff.STOP;
+            }
+            // (2^n) * initialInterval; the shift is capped so a misconfigured max_retries cannot overflow.
+            final long exponential = initialIntervalMillis << Math.min(retryCount, 32);
+            retryCount++;
+            return Math.min(exponential + random.nextInt(MAX_JITTER_MS), maxBackOffMillis);
+        }
+
+        /**
+         * Returns the upper bound of a single wait, in milliseconds.
+         *
+         * @return The upper bound, in milliseconds.
+         */
+        protected long getMaxBackOffMillis() {
+            return maxBackOffMillis;
+        }
+
+        /**
+         * Returns the number of retries already handed out.
+         *
+         * @return The retry count.
+         */
+        protected int getRetryCount() {
+            return retryCount;
+        }
+    }
+
+    /**
+     * A Drive API call that may fail with an {@link IOException}.
+     *
+     * @param <T> The result type.
+     */
+    @FunctionalInterface
+    protected interface DriveCall<T> {
+        /**
+         * Executes the call.
+         *
+         * @return The result of the call.
+         * @throws IOException If the call fails.
+         */
+        T call() throws IOException;
+    }
+
+    /**
+     * Creates a back-off configured from the data store parameters.
+     *
+     * @return A new back-off.
+     */
+    protected GoogleBackOff newBackOff() {
+        return new GoogleBackOff(maxRetries, retryInitialIntervalMillis, maxBackOffMillis, new Random());
+    }
+
+    /**
+     * Decides whether a failed Drive API call is worth retrying.
+     * <p>
+     * A 403 is ambiguous: Drive returns it both for quota exhaustion and for permanent authorization
+     * failures such as a missing scope. Only the JSON body distinguishes them, and
+     * {@link HttpResponseException#getContent()} already holds that body as a string, so the
+     * classification is done here rather than in an {@code HttpUnsuccessfulResponseHandler}, whose
+     * {@code handleResponse} sees the body as a one-shot stream.
+     * </p>
+     *
+     * @param e The failure.
+     * @return true if the call should be retried.
+     */
+    protected static boolean isRetryable(final HttpResponseException e) {
+        final int statusCode = e.getStatusCode();
+        if (statusCode == 429 || statusCode == 500 || statusCode == 502 || statusCode == 503 || statusCode == 504) {
+            return true;
+        }
+        if (statusCode != 403) {
+            return false;
+        }
+        if (e instanceof final GoogleJsonResponseException je && je.getDetails() != null && je.getDetails().getErrors() != null) {
+            for (final GoogleJsonError.ErrorInfo info : je.getDetails().getErrors()) {
+                if (RETRYABLE_403_REASONS.contains(info.getReason())) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        // A call issued through a plain HttpRequest, such as the Admin SDK one, never becomes a
+        // GoogleJsonResponseException, so the reason has to be read out of the raw body. The quotes
+        // keep a longer reason that merely ends with a retryable one, e.g. sharingRateLimitExceeded,
+        // from being mistaken for a quota error.
+        final String content = e.getContent();
+        if (content == null) {
+            return false;
+        }
+        for (final String reason : RETRYABLE_403_REASONS) {
+            if (content.contains("\"" + reason + "\"")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Returns the wait requested by a {@code Retry-After} header, in milliseconds.
+     * Only the delta-seconds form is honoured; an HTTP-date falls back to the exponential wait.
+     *
+     * @param e The failure.
+     * @return The requested wait in milliseconds, or 0 when there is none.
+     */
+    protected static long getRetryAfterMillis(final HttpResponseException e) {
+        final HttpHeaders headers = e.getHeaders();
+        if (headers == null) {
+            return 0L;
+        }
+        final String retryAfter = headers.getRetryAfter();
+        if (StringUtil.isBlank(retryAfter)) {
+            return 0L;
+        }
+        try {
+            return Long.parseLong(retryAfter.trim()) * 1000L;
+        } catch (final NumberFormatException ex) {
+            return 0L;
+        }
+    }
+
+    /**
+     * Returns how long a retryable failure should be waited out, in milliseconds.
+     * <p>
+     * A {@code Retry-After} wins over the exponential wait, but is clamped by the maximum back-off so
+     * that a hostile or mistaken header cannot stall the crawl for hours. The result is never
+     * negative, so a misconfigured interval cannot turn into an {@link IllegalArgumentException} at
+     * the {@link Thread#sleep(long)} call.
+     * </p>
+     *
+     * @param backOffMillis The exponential wait handed out by the back-off.
+     * @param e The failure.
+     * @param maxBackOffMillis The upper bound of a single wait, in milliseconds.
+     * @return The wait, in milliseconds.
+     */
+    protected static long computeWaitMillis(final long backOffMillis, final HttpResponseException e, final long maxBackOffMillis) {
+        final long waitMillis = Math.min(Math.max(backOffMillis, getRetryAfterMillis(e)), maxBackOffMillis);
+        return waitMillis > 0L ? waitMillis : 0L;
+    }
+
+    /**
+     * Executes a Drive API call, retrying throttled and transient failures with an exponential back-off.
+     *
+     * @param <T> The result type.
+     * @param operation A short description used in the log messages.
+     * @param backOff The back-off that bounds the retries.
+     * @param call The call to execute.
+     * @return The result of the call.
+     * @throws IOException If the call fails permanently or the retry budget is exhausted.
+     */
+    protected static <T> T executeWithRetry(final String operation, final GoogleBackOff backOff, final DriveCall<T> call)
+            throws IOException {
+        while (true) {
+            try {
+                return call.call();
+            } catch (final HttpResponseException e) {
+                if (!isRetryable(e)) {
+                    throw e;
+                }
+                final long backOffMillis = backOff.nextBackOffMillis();
+                if (backOffMillis == BackOff.STOP) {
+                    logger.warn("Giving up {} after {} retries. (status: {})", operation, Integer.valueOf(backOff.getRetryCount()),
+                            Integer.valueOf(e.getStatusCode()));
+                    throw e;
+                }
+                final long waitMillis = computeWaitMillis(backOffMillis, e, backOff.getMaxBackOffMillis());
+                logger.warn("Retrying {} in {} ms. (status: {})", operation, Long.valueOf(waitMillis), Integer.valueOf(e.getStatusCode()));
+                try {
+                    Thread.sleep(waitMillis);
+                } catch (final InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted while waiting to retry " + operation, ie);
+                }
+            }
+        }
+    }
+
+    /**
+     * Executes a Drive API call with a back-off configured from the data store parameters.
+     *
+     * @param <T> The result type.
+     * @param operation A short description used in the log messages.
+     * @param call The call to execute.
+     * @return The result of the call.
+     * @throws IOException If the call fails permanently or the retry budget is exhausted.
+     */
+    protected <T> T executeWithRetry(final String operation, final DriveCall<T> call) throws IOException {
+        return executeWithRetry(operation, newBackOff(), call);
     }
 
     /**
