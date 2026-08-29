@@ -53,6 +53,7 @@ import com.google.api.client.http.javanet.NetHttpTransport.Builder;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.model.DriveList;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
 import com.google.api.services.drive.model.Permission;
@@ -122,6 +123,12 @@ public class GSuiteClient implements AutoCloseable {
     /** The field projection used by permissions.list. */
     protected static final String PERMISSION_FIELDS =
             "nextPageToken,permissions(id,type,role,emailAddress,domain,deleted,allowFileDiscovery,permissionDetails)";
+
+    /** The maximum page size accepted by drives.list. The API caps this at 100, unlike files.list. */
+    protected static final int DRIVE_PAGE_SIZE_LIMIT = 100;
+
+    /** The field projection used by drives.list. */
+    protected static final String DRIVE_FIELDS = "nextPageToken,drives(id,name)";
 
     /** The Google Drive client. */
     protected Drive drive;
@@ -423,6 +430,38 @@ public class GSuiteClient implements AutoCloseable {
             throw new DataStoreException("Failed to access permissions of " + fileId + ".", e);
         }
         return permissionList;
+    }
+
+    /**
+     * Enumerates every shared drive of the domain, following pagination.
+     * <p>
+     * Requires the caller to be impersonating a Google Workspace domain administrator: the request
+     * sets {@code useDomainAdminAccess=true}, which returns every shared drive of the domain the
+     * requester administers, whether or not the requester is a member of it.
+     *
+     * @param consumer A consumer for each shared drive.
+     */
+    public void getDrives(final Consumer<com.google.api.services.drive.model.Drive> consumer) {
+        String pageToken = null;
+        try {
+            do {
+                final Drive.Drives.List list = getDrive().drives()
+                        .list()
+                        .setUseDomainAdminAccess(Boolean.TRUE)
+                        .setPageSize(Integer.valueOf(DRIVE_PAGE_SIZE_LIMIT))
+                        .setFields(DRIVE_FIELDS)
+                        .setPageToken(pageToken);
+                final DriveList result = list.execute();
+                if (result.getDrives() != null) {
+                    for (final com.google.api.services.drive.model.Drive sharedDrive : result.getDrives()) {
+                        consumer.accept(sharedDrive);
+                    }
+                }
+                pageToken = result.getNextPageToken();
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to access shared drives.", e);
+        }
     }
 
     /**

@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import org.codelibs.fess.entity.DataStoreParams;
@@ -128,6 +129,50 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
             final List<Permission> permissions = client.getPermissions("F1", false);
             assertNotNull(permissions);
             assertTrue(permissions.isEmpty());
+            assertEquals(1, transport.getRequestedUrls().size());
+        }
+    }
+
+    @Test
+    public void test_getDrives_paginatesWithDomainAdminAccess() {
+        final MockDriveTransport transport = new MockDriveTransport();
+        transport.queueJson("{\"nextPageToken\":\"D2\",\"drives\":[{\"id\":\"drive1\",\"name\":\"Sales\"}]}");
+        transport.queueJson("{\"drives\":[{\"id\":\"drive2\",\"name\":\"Engineering\"}]}");
+        final Drive mockDrive = newDrive(transport);
+        final List<String> driveIds = new ArrayList<>();
+        try (GSuiteClient client = new GSuiteClient(newParams(), transport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+        }) {
+            client.getDrives(d -> driveIds.add(d.getId()));
+            assertEquals(2, driveIds.size());
+            assertEquals("drive1", driveIds.get(0));
+            assertEquals("drive2", driveIds.get(1));
+            final List<String> urls = transport.getRequestedUrls();
+            assertEquals(2, urls.size());
+            assertTrue(urls.get(0), urls.get(0).contains("/drive/v3/drives"));
+            assertTrue(urls.get(0), urls.get(0).contains("useDomainAdminAccess=true"));
+            assertTrue(urls.get(0), urls.get(0).contains("pageSize=100"));
+            assertTrue(urls.get(1), urls.get(1).contains("pageToken=D2"));
+        }
+    }
+
+    @Test
+    public void test_getDrives_emptyResponse() {
+        final MockDriveTransport transport = new MockDriveTransport();
+        transport.queueJson("{}");
+        final Drive mockDrive = newDrive(transport);
+        final List<String> driveIds = new ArrayList<>();
+        try (GSuiteClient client = new GSuiteClient(newParams(), transport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+        }) {
+            client.getDrives(d -> driveIds.add(d.getId()));
+            assertTrue(driveIds.isEmpty());
             assertEquals(1, transport.getRequestedUrls().size());
         }
     }
