@@ -257,8 +257,30 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected String extractorName = "tikaExtractor";
 
     // other
-    /** The fields to retrieve for files. */
-    protected static final String FILE_FIELDS = "*";
+    /** Parameter key for the file field projection. */
+    protected static final String FIELDS = "fields";
+
+    /** The wildcard projection. Accepted but expensive: files.list then returns every field of every file. */
+    protected static final String WILDCARD_FIELDS = "*";
+
+    /**
+     * The default {@code files(...)} projection. It covers every getter {@code buildFileMap} reads plus
+     * the fields the ACL resolution, the index URL and the incremental crawl need. A field that is not
+     * listed here is null in the script context, which is why "*" stays available as an escape hatch.
+     * <p>
+     * {@code permissions}, {@code owners}, {@code driveId} and {@code hasAugmentedPermissions} carry
+     * the whole ACL: they feed the three tiers of {@link DrivePermissionResolver#resolve}, and
+     * dropping any of them silently strips the roles of every crawled document instead of failing.
+     * </p>
+     */
+    protected static final String DEFAULT_FILE_FIELDS = "id,name,description,mimeType,size,kind,fileExtension,fullFileExtension,"
+            + "originalFilename,md5Checksum,headRevisionId,iconLink,thumbnailLink,thumbnailVersion,hasThumbnail,webViewLink,"
+            + "webContentLink,exportLinks,createdTime,modifiedTime,modifiedByMe,modifiedByMeTime,viewedByMe,viewedByMeTime,"
+            + "trashed,explicitlyTrashed,trashedTime,trashingUser(emailAddress,displayName),parents,folderColorRgb,"
+            + "owners(emailAddress,displayName),ownedByMe,lastModifyingUser(emailAddress,displayName),shared,driveId,teamDriveId,"
+            + "permissions(id,type,role,emailAddress,domain,deleted,allowFileDiscovery,permissionDetails),permissionIds,"
+            + "hasAugmentedPermissions,capabilities,quotaBytesUsed,version,writersCanShare,viewersCanCopyContent,"
+            + "copyRequiresWriterPermission,isAppAuthorized,appProperties,contentHints,imageMediaMetadata,videoMediaMetadata";
 
     /**
      * Default constructor.
@@ -419,6 +441,43 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Returns the inner {@code files(...)} projection, that is the field list without the files.list
+     * envelope. changes.list needs this form because it nests the file under {@code changes(file(...))}.
+     *
+     * @param paramMap The parameters for the data store.
+     * @return The inner projection, or "*".
+     */
+    protected String getFileFieldProjection(final DataStoreParams paramMap) {
+        final String value = paramMap.getAsString(FIELDS, DEFAULT_FILE_FIELDS);
+        if (StringUtil.isBlank(value)) {
+            return DEFAULT_FILE_FIELDS;
+        }
+        return value.trim();
+    }
+
+    /**
+     * Builds the {@code fields} value handed to files.list.
+     * <p>
+     * "*" is passed through so an existing configuration keeps working, an already complete projection
+     * is used verbatim, and a bare field list is wrapped in the files.list envelope so
+     * {@code nextPageToken} and {@code incompleteSearch} are always returned (D-15).
+     * </p>
+     *
+     * @param paramMap The parameters for the data store.
+     * @return The projection for files.list.
+     */
+    protected String buildFileFields(final DataStoreParams paramMap) {
+        final String value = getFileFieldProjection(paramMap);
+        if (WILDCARD_FIELDS.equals(value)) {
+            return WILDCARD_FIELDS;
+        }
+        if (value.contains("files(") || value.contains("nextPageToken")) {
+            return value;
+        }
+        return "nextPageToken,incompleteSearch,files(" + value + ")";
+    }
+
+    /**
      * Creates a new fixed thread pool.
      * @param nThreads The number of threads.
      * @return A new fixed thread pool.
@@ -513,7 +572,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String query = paramMap.getAsString("query");
         final String corpora = paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES);
         final String spaces = paramMap.getAsString("spaces");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String fields = buildFileFields(paramMap);
         client.getFiles(query, corpora, spaces, fields, file -> submitFile(dataConfig, callback, configMap, paramMap, scriptMap,
                 defaultDataMap, client, executorService, crawledFileIds, file));
     }
@@ -535,7 +594,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
         final String query = paramMap.getAsString("query");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String fields = buildFileFields(paramMap);
         client.getDrives(sharedDrive -> {
             if (!alive) {
                 // The admin UI asked this data store to stop; do not start another listing.
@@ -567,7 +626,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
         final String query = paramMap.getAsString("query");
         final String spaces = paramMap.getAsString("spaces");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String fields = buildFileFields(paramMap);
         for (final String userEmail : client.listUsers(paramMap.getAsString(USER_QUERY))) {
             if (!alive) {
                 // The admin UI asked this data store to stop; do not start another listing.
