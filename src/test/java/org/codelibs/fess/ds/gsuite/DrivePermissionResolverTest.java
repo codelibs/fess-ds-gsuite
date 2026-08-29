@@ -162,6 +162,9 @@ public class DrivePermissionResolverTest extends UnitDsTestCase {
     public void test_toRole_domainWithoutDomainValueIsExcluded() {
         final Permission permission = new Permission().setType("domain");
         assertNull(newResolver(new DataStoreParams()).toRole(permission));
+        // An empty or whitespace-only domain must be dropped too, not substituted into the format.
+        assertNull(newResolver(new DataStoreParams()).toRole(new Permission().setType("domain").setDomain("")));
+        assertNull(newResolver(new DataStoreParams()).toRole(new Permission().setType("domain").setDomain("   ")));
     }
 
     @Test
