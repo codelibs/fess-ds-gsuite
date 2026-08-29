@@ -133,6 +133,15 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      */
     protected static final String PERMISSION_RESOLVERS = "permission_resolvers";
 
+    /** Parameter key that enables incremental crawling. */
+    protected static final String INCREMENTAL = "incremental";
+
+    /**
+     * The parameter {@code DataIndexHelper} reads to skip its stale document sweep. Its own constant
+     * is private, so the key is spelled out here.
+     */
+    protected static final String DELETE_OLD_DOCS = "delete_old_docs";
+
     /** Parameter key for the crawl target. */
     protected static final String CRAWL_TARGET = "crawl_target";
     /** Parameter key for the administrator account to impersonate. */
@@ -309,6 +318,79 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     @Override
     protected String getName() {
         return this.getClass().getSimpleName();
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The incremental option has to be applied here rather than in {@link #storeData}:
+     * {@code AbstractDataStore#store} hands {@code storeData} a copy of the parameter map, while
+     * {@code DataIndexHelper} reads back the very {@code initParamMap} object it passed to this
+     * method.
+     * </p>
+     * <p>
+     * The suppression is written twice on purpose. {@code AbstractDataStore#store} merges the handler
+     * parameters into {@code initParamMap}, so an explicit {@code delete_old_docs=true} would
+     * otherwise overwrite the first write; and {@code DataIndexHelper} sweeps in a {@code finally}
+     * block, so the second write has to happen even when the crawl failed.
+     * </p>
+     */
+    @Override
+    public void store(final DataConfig config, final IndexUpdateCallback callback, final DataStoreParams initParamMap) {
+        if (!isIncrementalConfig(config)) {
+            super.store(config, callback, initParamMap);
+            return;
+        }
+        logger.info("Incremental crawling is enabled: the stale document sweep is disabled for this run.");
+        disableDeleteOldDocsIfIncremental(config, initParamMap);
+        try {
+            super.store(config, callback, initParamMap);
+        } finally {
+            disableDeleteOldDocsIfIncremental(config, initParamMap);
+        }
+    }
+
+    /**
+     * Returns whether the data configuration asks for an incremental crawl.
+     *
+     * @param config The data configuration, possibly null.
+     * @return true when incremental crawling is enabled.
+     */
+    protected boolean isIncrementalConfig(final DataConfig config) {
+        if (config == null) {
+            return false;
+        }
+        return Constants.TRUE.equalsIgnoreCase(config.getHandlerParameterMap().get(INCREMENTAL));
+    }
+
+    /**
+     * Switches off the stale document sweep of {@code DataIndexHelper} when the crawl is incremental.
+     * <p>
+     * {@code DataIndexHelper#deleteOldDocs()} deletes every document of the configuration whose
+     * segment differs from the current session id, which assumes a full crawl. An incremental run
+     * only touches the documents that changed, so the sweep would delete the rest of the index.
+     * </p>
+     * <p>
+     * An explicit {@code delete_old_docs=true} is overridden rather than honoured: combined with
+     * {@code incremental=true} it is not a preference but a data loss, and the supported way to drop
+     * documents that vanished from Drive is a separate {@code incremental=false} configuration whose
+     * full crawl sweeps them. The override is logged so it is visible in the crawler log.
+     * </p>
+     *
+     * @param config The data configuration, possibly null.
+     * @param initParamMap The parameter map {@code DataIndexHelper} reads back.
+     */
+    protected void disableDeleteOldDocsIfIncremental(final DataConfig config, final DataStoreParams initParamMap) {
+        if (!isIncrementalConfig(config)) {
+            return;
+        }
+        final String configured = initParamMap.getAsString(DELETE_OLD_DOCS);
+        if (StringUtil.isNotBlank(configured) && !Constants.FALSE.equalsIgnoreCase(configured)) {
+            logger.warn("'{}={}' is ignored because '{}' is enabled: an incremental run only sees changed documents, so the stale "
+                    + "document sweep would delete every document it did not touch. Schedule a separate '{}=false' configuration to "
+                    + "drop the documents that vanished from Drive.", DELETE_OLD_DOCS, configured, INCREMENTAL, INCREMENTAL);
+        }
+        initParamMap.put(DELETE_OLD_DOCS, Constants.FALSE);
     }
 
     @Override
