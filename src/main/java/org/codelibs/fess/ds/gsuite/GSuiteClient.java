@@ -108,6 +108,9 @@ public class GSuiteClient implements AutoCloseable {
     /** Corpora value that scopes files.list to a single shared drive. */
     public static final String DRIVE_CORPORA = "drive";
 
+    /** Corpora value that scopes files.list to the files of the requesting user, i.e. their My Drive. */
+    public static final String USER_CORPORA = "user";
+
     /** Default maximum cached content size in bytes (1MB). */
     protected static final int DEFAULT_MAX_CACHED_CONTENT_SIZE = 1024 * 1024;
 
