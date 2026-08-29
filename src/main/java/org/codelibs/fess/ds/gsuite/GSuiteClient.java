@@ -71,11 +71,14 @@ import com.google.api.client.util.BackOff;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.About;
+import com.google.api.services.drive.model.Change;
+import com.google.api.services.drive.model.ChangeList;
 import com.google.api.services.drive.model.DriveList;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
 import com.google.api.services.drive.model.Permission;
 import com.google.api.services.drive.model.PermissionList;
+import com.google.api.services.drive.model.StartPageToken;
 import com.google.auth.http.HttpCredentialsAdapter;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
@@ -175,6 +178,22 @@ public class GSuiteClient implements AutoCloseable {
     /** The field projection used by drives.list. */
     protected static final String DRIVE_FIELDS = "nextPageToken,drives(id,name)";
 
+    /**
+     * The wildcard file projection, meaning "every field of the file". It is the default of
+     * {@link #fileFields} and the escape hatch a configuration may set.
+     */
+    protected static final String WILDCARD_FILE_FIELDS = "*";
+
+    /**
+     * The change-level part of the changes.list projection, up to but not including the file.
+     * <p>
+     * {@code fileId} is listed because a removed change carries no {@code file} at all, so it is the
+     * only handle on the document that has to be dropped from the index.
+     * </p>
+     */
+    protected static final String CHANGE_FIELDS_PREFIX =
+            "newStartPageToken,nextPageToken,changes(changeType,removed,fileId,driveId,time,file";
+
     /** The Admin SDK Directory endpoint that lists users. */
     protected static final String ADMIN_DIRECTORY_USERS_URL = "https://admin.googleapis.com/admin/directory/v1/users";
 
@@ -260,6 +279,9 @@ public class GSuiteClient implements AutoCloseable {
 
     /** The page size of permissions.list and drives.list. */
     protected int permissionPageSize = DEFAULT_PERMISSION_PAGE_SIZE;
+
+    /** The file projection nested under {@code changes(file(...))} by changes.list. */
+    protected String fileFields = WILDCARD_FILE_FIELDS;
 
     /** The cached source mime type to export target map returned by about.get. */
     protected volatile Map<String, List<String>> exportFormats;
@@ -817,6 +839,140 @@ public class GSuiteClient implements AutoCloseable {
         } catch (final IOException e) {
             reportFailure(target, e);
         }
+    }
+
+    /**
+     * Sets the file field projection used by changes.list.
+     * <p>
+     * The data store passes the same projection it hands to files.list, so a changed file carries
+     * every field the script context needs. A blank value leaves the current projection alone.
+     * </p>
+     *
+     * @param fileFields The inner {@code files(...)} projection, or "*".
+     */
+    public void setFileFields(final String fileFields) {
+        if (StringUtil.isNotBlank(fileFields)) {
+            this.fileFields = fileFields.trim();
+        }
+    }
+
+    /**
+     * Returns whether a file projection can be nested under {@code changes(file(...))}.
+     * <p>
+     * The configured projection is whatever the data store resolved, which may already be a complete
+     * files.list projection such as {@code nextPageToken,files(id,name)} or the wildcard. Neither can
+     * be nested: changes.list has its own envelope, and Drive rejects the resulting {@code fields}
+     * with a 400, which would fail every page of the feed rather than just degrade it.
+     * </p>
+     *
+     * @param fileFields The configured projection.
+     * @return true when the value is a bare field list.
+     */
+    protected static boolean isNestableFileProjection(final String fileFields) {
+        return !WILDCARD_FILE_FIELDS.equals(fileFields) && !fileFields.contains("files(") && !fileFields.contains("nextPageToken");
+    }
+
+    /**
+     * Builds the {@code fields} value handed to changes.list.
+     * <p>
+     * Without it {@code file} is returned with the default minimal field set, which is not enough to
+     * index a document. A projection that cannot be nested falls back to the whole file resource,
+     * which is never less than what was asked for.
+     * </p>
+     *
+     * @return The projection for changes.list.
+     */
+    protected String buildChangeFields() {
+        if (isNestableFileProjection(fileFields)) {
+            return CHANGE_FIELDS_PREFIX + "(" + fileFields + "))";
+        }
+        return CHANGE_FIELDS_PREFIX + ")";
+    }
+
+    /**
+     * Returns the change feed start page token of a scope, that is the anchor a later incremental
+     * run resumes from.
+     * <p>
+     * A failure is thrown rather than reported: without an anchor the scope cannot be crawled
+     * incrementally at all, and a null would be indistinguishable from "nothing changed".
+     * </p>
+     *
+     * @param driveId The shared drive ID, or null for the My Drive scope of the impersonated user.
+     * @return The start page token.
+     */
+    public String getStartPageToken(final String driveId) {
+        try {
+            final StartPageToken result = executeWithRetry(describeTarget("changes.getStartPageToken(" + driveId + ")"), () -> {
+                final Drive.Changes.GetStartPageToken request = getDrive().changes().getStartPageToken().setSupportsAllDrives(Boolean.TRUE);
+                if (StringUtil.isNotBlank(driveId)) {
+                    request.setDriveId(driveId);
+                }
+                return request.execute();
+            });
+            return result.getStartPageToken();
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to get a start page token. (driveId: " + driveId + ")", e);
+        }
+    }
+
+    /**
+     * Streams every change since {@code pageToken} and returns the token to persist for the next run.
+     * <p>
+     * {@code includeRemoved} and {@code includeCorpusRemovals} default to false in the API and are the
+     * only signal for deletions and revoked access, so they are always requested. The last page
+     * returns {@code newStartPageToken} rather than {@code nextPageToken}; persisting the latter
+     * replays the same deltas.
+     * <p>
+     * Unlike the file listings, a permanent failure is thrown rather than reported and skipped. A
+     * change feed that lost a page has lost updates <em>and</em> would advance its token past them,
+     * which no later run can recover from without a full resynchronization. Throwing leaves the
+     * stored token untouched, so the deltas already handed to the consumer are simply replayed.
+     * <p>
+     * A blank {@code pageToken} means the scope has no anchor yet: no request is issued and null is
+     * returned, so the caller falls back to a full crawl instead of reading it as "nothing changed".
+     * </p>
+     *
+     * @param pageToken The token stored by a previous run.
+     * @param driveId The shared drive ID, or null for the My Drive scope of the impersonated user.
+     * @param consumer A consumer for each change.
+     * @return The newStartPageToken returned on the last page, or null when nothing was read.
+     */
+    public String getChanges(final String pageToken, final String driveId, final Consumer<Change> consumer) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("pageToken: {}, driveId: {}", pageToken, driveId);
+        }
+        final String target = describeTarget("changes.list(driveId=" + driveId + ")");
+        String token = pageToken;
+        String newStartPageToken = null;
+        try {
+            while (StringUtil.isNotBlank(token)) {
+                final String currentToken = token;
+                final ChangeList result = executeWithRetry(target, () -> {
+                    final Drive.Changes.List list = getDrive().changes()
+                            .list(currentToken)
+                            .setPageSize(Integer.valueOf(pageSize))
+                            .setIncludeRemoved(Boolean.TRUE)
+                            .setIncludeCorpusRemovals(Boolean.TRUE)
+                            .setIncludeItemsFromAllDrives(Boolean.TRUE)
+                            .setSupportsAllDrives(Boolean.TRUE)
+                            .setFields(buildChangeFields());
+                    if (StringUtil.isNotBlank(driveId)) {
+                        list.setDriveId(driveId);
+                    }
+                    return list.execute();
+                });
+                if (result.getChanges() != null) {
+                    for (final Change change : result.getChanges()) {
+                        consumer.accept(change);
+                    }
+                }
+                newStartPageToken = result.getNewStartPageToken();
+                token = result.getNextPageToken();
+            }
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to list " + target + ".", e);
+        }
+        return newStartPageToken;
     }
 
     /**
