@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.exception.DataStoreException;
 import org.junit.jupiter.api.Test;
 
 import com.google.api.client.http.HttpRequestFactory;
@@ -398,6 +399,112 @@ public class GSuiteClientApiTest extends UnitDsTestCase {
             assertEquals("admin@example.com", client.params.getAsString(GSuiteClient.IMPERSONATE_USER));
             assertEquals("admin@example.com", ((ServiceAccountCredentials) client.credentials).getServiceAccountUser());
         }
+    }
+
+    /** permissions.list must send the configured permission page size. */
+    @Test
+    public void test_getPermissions_sendsConfiguredPageSize() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson(
+                "{\"permissions\":[{\"id\":\"p1\",\"type\":\"user\",\"role\":\"reader\"," + "\"emailAddress\":\"a@example.com\"}]}");
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.PERMISSION_PAGE_SIZE, "50");
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            assertEquals(1, client.getPermissions("F1", false).size());
+        }
+        final String url = mockTransport.getRequestedUrls().get(0);
+        assertTrue(url, url.contains("pageSize=50"));
+    }
+
+    /** permissions.list caps pageSize at 100, so a larger value must be clamped instead of drawing a 400. */
+    @Test
+    public void test_getPermissions_clampsPageSizeToApiLimit() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"permissions\":[]}");
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.PERMISSION_PAGE_SIZE, "1000");
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            assertTrue("an empty list is returned, never null", client.getPermissions("F1", false).isEmpty());
+        }
+        final String url = mockTransport.getRequestedUrls().get(0);
+        assertTrue(url, url.contains("pageSize=100"));
+        assertFalse(url, url.contains("pageSize=1000"));
+    }
+
+    /** drives.list is capped at 100 too and takes the same parameter. */
+    @Test
+    public void test_getDrives_sendsConfiguredPageSize() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"drives\":[{\"id\":\"drive1\",\"name\":\"Sales\"}]}");
+        final DataStoreParams params = newParams();
+        params.put(GSuiteClient.PERMISSION_PAGE_SIZE, "25");
+        final List<String> driveIds = new ArrayList<>();
+        try (GSuiteClient client = newClient(params, mockTransport)) {
+            client.getDrives(d -> driveIds.add(d.getId()));
+        }
+        assertEquals(1, driveIds.size());
+        final String url = mockTransport.getRequestedUrls().get(0);
+        assertTrue(url, url.contains("pageSize=25"));
+    }
+
+    /**
+     * A throttled permissions.list page is retried and every page is still returned: an ACL that
+     * lost a page would silently narrow the roles of every document of the drive.
+     */
+    @Test
+    public void test_getPermissions_retriesAndStillReturnsEveryPage() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"nextPageToken\":\"P2\",\"permissions\":[{\"id\":\"p1\",\"type\":\"user\",\"role\":\"reader\","
+                + "\"emailAddress\":\"a@example.com\"}]}");
+        queueError(mockTransport, 429, "{\"error\":{\"code\":429,\"message\":\"slow down\"}}");
+        mockTransport.queueJson(
+                "{\"permissions\":[{\"id\":\"p2\",\"type\":\"group\",\"role\":\"reader\"," + "\"emailAddress\":\"g@example.com\"}]}");
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            final List<Permission> permissions = client.getPermissions("D1", true);
+            assertEquals(2, permissions.size());
+            assertEquals("a@example.com", permissions.get(0).getEmailAddress());
+            assertEquals("g@example.com", permissions.get(1).getEmailAddress());
+        }
+        assertEquals(3, mockTransport.getRequestedUrls().size());
+    }
+
+    /**
+     * A permanent permissions.list failure must propagate. A partial ACL is not a usable ACL: the
+     * resolver caches it per drive and every document of that drive would silently lose the roles
+     * carried by the pages that were never read.
+     */
+    @Test
+    public void test_getPermissions_failsInsteadOfReturningAPartialAcl() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queueJson("{\"nextPageToken\":\"P2\",\"permissions\":[{\"id\":\"p1\",\"type\":\"user\",\"role\":\"reader\","
+                + "\"emailAddress\":\"a@example.com\"}]}");
+        queueError(mockTransport, 400, "{\"error\":{\"code\":400,\"message\":\"bad request\"}}");
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            client.setFailureHandler((target, e) -> fail("a partial ACL must not be reported as a skippable failure"));
+            client.getPermissions("D1", true);
+            fail("Expected DataStoreException");
+        } catch (final DataStoreException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("D1"));
+        }
+    }
+
+    /**
+     * drives.list decides the whole scope of a shared drive crawl, so a permanent failure must
+     * propagate. Swallowing it would let a crawl that enumerated nothing report success.
+     */
+    @Test
+    public void test_getDrives_failsInsteadOfCrawlingNothing() {
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        queueError(mockTransport, 403, "{\"error\":{\"code\":403,\"errors\":[{\"reason\":\"insufficientPermissions\","
+                + "\"message\":\"Insufficient permissions\"}],\"message\":\"Insufficient permissions\"}}");
+        try (GSuiteClient client = newClient(newFastRetryParams(), mockTransport)) {
+            client.setFailureHandler((target, e) -> fail("an empty drive enumeration must not be reported as a skippable failure"));
+            client.getDrives(d -> fail("no shared drive is expected"));
+            fail("Expected DataStoreException");
+        } catch (final DataStoreException e) {
+            assertNotNull(e.getMessage());
+        }
+        assertEquals(1, mockTransport.getRequestedUrls().size());
     }
 
     /** files.list must be paged and must send the configured page size. */

@@ -147,6 +147,12 @@ public class GSuiteClient implements AutoCloseable {
     /** The maximum page size accepted by files.list. A larger value is rejected with a 400. */
     protected static final int FILE_PAGE_SIZE_LIMIT = 1000;
 
+    /** Parameter key for the page size of permissions.list and drives.list. */
+    protected static final String PERMISSION_PAGE_SIZE = "permission_page_size";
+
+    /** Default page size of permissions.list and drives.list, which is also the maximum both accept. */
+    protected static final int DEFAULT_PERMISSION_PAGE_SIZE = 100;
+
     /** The maximum page size accepted by permissions.list. The API caps this at 100. */
     protected static final int PERMISSION_PAGE_SIZE_LIMIT = 100;
 
@@ -223,6 +229,9 @@ public class GSuiteClient implements AutoCloseable {
     /** The page size of files.list. */
     protected int pageSize = DEFAULT_PAGE_SIZE;
 
+    /** The page size of permissions.list and drives.list. */
+    protected int permissionPageSize = DEFAULT_PERMISSION_PAGE_SIZE;
+
     /**
      * Invoked when a listing fails permanently. The default only logs; the data store replaces it
      * with one that also records the failure so that the operator finds it in the failure URL list.
@@ -267,6 +276,9 @@ public class GSuiteClient implements AutoCloseable {
             logger.warn("{} is no longer used. Access tokens are refreshed by google-auth-library.", REFRESH_TOKEN_INTERVAL);
         }
         pageSize = clampPageSize(PAGE_SIZE, getIntParam(params, PAGE_SIZE, DEFAULT_PAGE_SIZE), FILE_PAGE_SIZE_LIMIT);
+        // One value feeds two endpoints, so the smaller of the two caps applies.
+        permissionPageSize = clampPageSize(PERMISSION_PAGE_SIZE, getIntParam(params, PERMISSION_PAGE_SIZE, DEFAULT_PERMISSION_PAGE_SIZE),
+                Math.min(PERMISSION_PAGE_SIZE_LIMIT, DRIVE_PAGE_SIZE_LIMIT));
         maxRetries = getIntParam(params, MAX_RETRIES, DEFAULT_MAX_RETRIES);
         retryInitialIntervalMillis = getIntParam(params, RETRY_INITIAL_INTERVAL_MS, DEFAULT_RETRY_INITIAL_INTERVAL_MS);
         maxBackOffMillis = getIntParam(params, MAX_BACKOFF_MS, DEFAULT_MAX_BACKOFF_MS);
@@ -584,27 +596,35 @@ public class GSuiteClient implements AutoCloseable {
      * <p>
      * {@code useDomainAdminAccess} is only honoured by the Drive API when {@code fileId} refers to a
      * shared drive and the caller is a domain administrator. Pass {@code false} for an ordinary file ID.
+     * <p>
+     * Unlike the file listings, a permanent failure is thrown rather than reported and skipped: the
+     * result is an ACL, the resolver caches it per drive, and a list that lost a page would silently
+     * strip the roles of every document of that drive. Either every page is returned or nothing is.
+     * </p>
      *
      * @param fileId The file ID or the shared drive ID.
      * @param useDomainAdminAccess Whether to issue the request as a domain administrator.
-     * @return The permissions. Never null, but possibly empty.
+     * @return The permissions of every page. Never null, but possibly empty.
      */
     public List<Permission> getPermissions(final String fileId, final boolean useDomainAdminAccess) {
         if (logger.isDebugEnabled()) {
             logger.debug("fileId: {}, useDomainAdminAccess: {}", fileId, useDomainAdminAccess);
         }
         final List<Permission> permissionList = new ArrayList<>();
+        final String target = describeTarget("permissions.list(" + fileId + ")");
         String pageToken = null;
         try {
             do {
-                final Drive.Permissions.List list = getDrive().permissions()
-                        .list(fileId)
-                        .setSupportsAllDrives(Boolean.TRUE)
-                        .setUseDomainAdminAccess(Boolean.valueOf(useDomainAdminAccess))
-                        .setPageSize(Integer.valueOf(PERMISSION_PAGE_SIZE_LIMIT))
-                        .setFields(PERMISSION_FIELDS)
-                        .setPageToken(pageToken);
-                final PermissionList result = list.execute();
+                final String currentToken = pageToken;
+                final PermissionList result = executeWithRetry(target,
+                        () -> getDrive().permissions()
+                                .list(fileId)
+                                .setSupportsAllDrives(Boolean.TRUE)
+                                .setUseDomainAdminAccess(Boolean.valueOf(useDomainAdminAccess))
+                                .setPageSize(Integer.valueOf(permissionPageSize))
+                                .setFields(PERMISSION_FIELDS)
+                                .setPageToken(currentToken)
+                                .execute());
                 if (result.getPermissions() != null) {
                     permissionList.addAll(result.getPermissions());
                 }
@@ -622,20 +642,28 @@ public class GSuiteClient implements AutoCloseable {
      * Requires the caller to be impersonating a Google Workspace domain administrator: the request
      * sets {@code useDomainAdminAccess=true}, which returns every shared drive of the domain the
      * requester administers, whether or not the requester is a member of it.
+     * <p>
+     * This listing decides the whole scope of a shared drive crawl, so a permanent failure is thrown
+     * rather than reported and skipped: a crawl that enumerated no drive has not partially succeeded,
+     * and must not be able to report success while indexing nothing.
+     * </p>
      *
      * @param consumer A consumer for each shared drive.
      */
     public void getDrives(final Consumer<com.google.api.services.drive.model.Drive> consumer) {
+        final String target = describeTarget("drives.list");
         String pageToken = null;
         try {
             do {
-                final Drive.Drives.List list = getDrive().drives()
-                        .list()
-                        .setUseDomainAdminAccess(Boolean.TRUE)
-                        .setPageSize(Integer.valueOf(DRIVE_PAGE_SIZE_LIMIT))
-                        .setFields(DRIVE_FIELDS)
-                        .setPageToken(pageToken);
-                final DriveList result = list.execute();
+                final String currentToken = pageToken;
+                final DriveList result = executeWithRetry(target,
+                        () -> getDrive().drives()
+                                .list()
+                                .setUseDomainAdminAccess(Boolean.TRUE)
+                                .setPageSize(Integer.valueOf(permissionPageSize))
+                                .setFields(DRIVE_FIELDS)
+                                .setPageToken(currentToken)
+                                .execute());
                 if (result.getDrives() != null) {
                     for (final com.google.api.services.drive.model.Drive sharedDrive : result.getDrives()) {
                         consumer.accept(sharedDrive);
