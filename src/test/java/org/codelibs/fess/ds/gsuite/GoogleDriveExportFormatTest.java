@@ -22,6 +22,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
@@ -33,6 +34,7 @@ import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.junit.jupiter.api.Test;
 
+import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.model.File;
 
 /**
@@ -110,6 +112,38 @@ public class GoogleDriveExportFormatTest extends UnitDsTestCase {
             public InputStream getFileInputStream(final String id) {
                 requested.set(ALT_MEDIA);
                 throw new IllegalStateException("alt=media never works for a native Google type");
+            }
+        };
+    }
+
+    /**
+     * A real client whose export runs over {@link MockDriveTransport}, with the export size limit
+     * lowered so that a small body trips the guard.
+     * <p>
+     * The locals are deliberately not named {@code drive} or {@code params}: inside the anonymous
+     * subclass body the inherited fields of {@link GSuiteClient} would shadow them.
+     * </p>
+     *
+     * @param mockTransport The transport that replays the export response.
+     * @param limit The export size limit, in bytes.
+     * @return The client.
+     */
+    protected static GSuiteClient newSizeLimitedClient(final MockDriveTransport mockTransport, final long limit) {
+        final Drive mockDrive = GSuiteClientApiTest.newDrive(mockTransport);
+        return new GSuiteClient(GSuiteClientApiTest.newParams(), mockTransport) {
+            @Override
+            protected Drive getDrive() {
+                return mockDrive;
+            }
+
+            @Override
+            protected long getExportSizeLimit() {
+                return limit;
+            }
+
+            @Override
+            public Map<String, List<String>> getExportFormats() {
+                return newExportFormats();
             }
         };
     }
@@ -337,5 +371,95 @@ public class GoogleDriveExportFormatTest extends UnitDsTestCase {
         assertNull("a form is not a crawl failure", capturedError.get());
         assertNull("a form must be neither exported nor downloaded with alt=media", exported.get());
         assertNotNull("the form is still indexed with its metadata", stored.get());
+    }
+
+    /**
+     * D-18: unlike a Form, an export that overruns the size limit is a failure. A native Google file
+     * declares no size, so the guard is the only thing standing between the crawl and an unbounded
+     * buffer, and indexing the document with empty content would hide the truncation behind a
+     * document indistinguishable from one that genuinely has no text. It must reach
+     * {@code handleProcessingError} instead, so the operator finds the file in the failure list.
+     */
+    @Test
+    public void test_processFile_oversizedExportIsReportedInsteadOfIndexedEmpty() {
+        ComponentUtil.register(new SystemHelper(), "systemHelper");
+        final CrawlerStatsHelper crawlerStatsHelper = new CrawlerStatsHelper();
+        crawlerStatsHelper.init();
+        ComponentUtil.register(crawlerStatsHelper, "crawlerStatsHelper");
+        ComponentUtil.register(new FileTypeHelper(), "fileTypeHelper");
+        ComponentUtil.register(new PermissionHelper(), "permissionHelper");
+
+        final AtomicReference<Throwable> capturedError = new AtomicReference<>();
+        final AtomicReference<Map<String, Object>> stored = new AtomicReference<>();
+
+        final GoogleDriveDataStore dataStore = new GoogleDriveDataStore() {
+            @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // This test is about the export size guard, not about the ACL: the file only needs a
+                // role so that the fail-closed rule does not skip it first.
+                return Arrays.asList("1owner@example.com");
+            }
+
+            @Override
+            protected Object convertValue(final String scriptType, final String template, final Map<String, Object> resultMap) {
+                return resultMap.get(FILE);
+            }
+
+            @Override
+            protected void handleProcessingError(final DataConfig dataConfig, final File file, final Map<String, Object> configMap,
+                    final DataStoreParams paramMap, final Map<String, Object> dataMap, final StatsKeyObject statsKey,
+                    final CrawlerStatsHelper statsHelper, final Throwable t) {
+                capturedError.set(t);
+            }
+        };
+
+        final Map<String, Object> configMap = new HashMap<>();
+        configMap.put(GoogleDriveDataStore.MAX_SIZE, Long.valueOf(10000000L));
+        configMap.put(GoogleDriveDataStore.IGNORE_FOLDER, Boolean.TRUE);
+        // ignore_error defaults to true; an oversized export must be reported even so.
+        configMap.put(GoogleDriveDataStore.IGNORE_ERROR, Boolean.TRUE);
+        configMap.put(GoogleDriveDataStore.SUPPORTED_MIMETYPES, new String[] { ".*" });
+        configMap.put(GoogleDriveDataStore.URL_FILTER, null);
+
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("file", "file");
+
+        final File file = new File();
+        file.setId("d1");
+        file.setName("spec");
+        file.setMimeType(DOCUMENT);
+        file.setWebViewLink("https://drive.google.com/open?id=d1");
+
+        final MockDriveTransport mockTransport = new MockDriveTransport();
+        mockTransport.queue(200, "text/markdown; charset=UTF-8", "0123456789abcdef");
+        try (GSuiteClient client = newSizeLimitedClient(mockTransport, 8L)) {
+            dataStore.processFile(null, new IndexUpdateCallback() {
+                @Override
+                public void store(final DataStoreParams paramMap, final Map<String, Object> dataMap) {
+                    stored.set(dataMap);
+                }
+
+                @Override
+                public long getDocumentSize() {
+                    return 0;
+                }
+
+                @Override
+                public long getExecuteTime() {
+                    return 0;
+                }
+
+                @Override
+                public void commit() {
+                    // no-op
+                }
+            }, configMap, new DataStoreParams(), scriptMap, new HashMap<>(), client, file);
+        }
+
+        assertNull("an empty document must not be indexed in place of the oversized export", stored.get());
+        assertNotNull("an oversized export is a crawl failure", capturedError.get());
+        assertTrue(String.valueOf(capturedError.get()), capturedError.get() instanceof MaxLengthExceededException);
+        assertTrue(capturedError.get().getMessage(), capturedError.get().getMessage().contains("d1"));
     }
 }

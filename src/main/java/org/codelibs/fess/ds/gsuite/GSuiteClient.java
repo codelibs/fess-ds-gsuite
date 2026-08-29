@@ -46,6 +46,7 @@ import org.codelibs.core.exception.InterruptedRuntimeException;
 import org.codelibs.core.lang.StringUtil;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
+import org.codelibs.fess.crawler.exception.MaxLengthExceededException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
@@ -194,6 +195,9 @@ public class GSuiteClient implements AutoCloseable {
     protected static final int DEFAULT_MAX_BACKOFF_MS = 32000;
     /** Upper bound of the additive jitter recommended by Google, in milliseconds. */
     protected static final int MAX_JITTER_MS = 1000;
+
+    /** The output size limit of files.export, documented by Google as 10 MB. */
+    protected static final long EXPORT_SIZE_LIMIT = 10L * 1024 * 1024;
 
     /**
      * The 403 error reasons that mean "slow down" rather than "you may not do this".
@@ -913,19 +917,106 @@ public class GSuiteClient implements AutoCloseable {
     }
 
     /**
-     * Extracts the text from a file.
+     * Thrown when an export outgrows {@link #getExportSizeLimit()}. It is a runtime exception
+     * because it has to travel out of {@code executeMediaAndDownloadTo}, whose OutputStream contract
+     * only allows an IOException.
+     */
+    protected static class ExportSizeLimitExceededException extends RuntimeException {
+
+        private static final long serialVersionUID = 1L;
+
+        /**
+         * Constructs a new ExportSizeLimitExceededException.
+         *
+         * @param message The detail message.
+         */
+        protected ExportSizeLimitExceededException(final String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * A {@link ByteArrayOutputStream} that refuses to buffer more than a fixed number of bytes.
+     * Without it an oversized export grows the heap without bound, since a native Google file
+     * declares no size and the response is streamed straight into memory (D-18).
+     */
+    protected static class BoundedByteArrayOutputStream extends ByteArrayOutputStream {
+
+        /** The maximum number of bytes that may be buffered. */
+        protected final long limit;
+
+        /**
+         * Constructs a new BoundedByteArrayOutputStream.
+         *
+         * @param limit The maximum number of bytes that may be buffered.
+         */
+        protected BoundedByteArrayOutputStream(final long limit) {
+            this.limit = limit;
+        }
+
+        @Override
+        public synchronized void write(final int b) {
+            checkLimit(1L);
+            super.write(b);
+        }
+
+        @Override
+        public synchronized void write(final byte[] b, final int off, final int len) {
+            checkLimit(len);
+            super.write(b, off, len);
+        }
+
+        /**
+         * Fails before buffering when the write would push the buffer past the limit.
+         *
+         * @param additional The number of bytes about to be written.
+         */
+        protected void checkLimit(final long additional) {
+            if (size() + additional > limit) {
+                throw new ExportSizeLimitExceededException("The exported content exceeds " + limit + " bytes.");
+            }
+        }
+    }
+
+    /**
+     * Returns the maximum number of bytes an export may produce.
+     *
+     * @return The limit, in bytes.
+     */
+    protected long getExportSizeLimit() {
+        return EXPORT_SIZE_LIMIT;
+    }
+
+    /**
+     * Extracts the text from a file through {@code files.export}.
      * <p>
      * Note that {@code files.export} has no {@code supportsAllDrives} parameter in the Drive v3
      * API, so unlike {@code files.get} this request cannot opt into shared drive support.
+     * <p>
+     * A native Google file declares no size, so {@link #getExportSizeLimit()} is the only bound on
+     * the buffer. An export that outgrows it is abandoned before the heap is spent and the file is
+     * skipped with a warning: a {@link MaxLengthExceededException} is a
+     * {@code CrawlingAccessException}, so the data store records the file in the admin failure list
+     * exactly as it already does for a file over {@code max_size}. Returning an empty string instead
+     * would index a document indistinguishable from one that genuinely has no text (D-18).
      * </p>
      * @param id The ID of the file.
      * @param mimeType The mime type of the file.
      * @return The text of the file.
      */
     public String extractFileText(final String id, final String mimeType) {
-        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            getDrive().files().export(id, mimeType).executeMediaAndDownloadTo(out);
+        final long limit = getExportSizeLimit();
+        try (BoundedByteArrayOutputStream out = new BoundedByteArrayOutputStream(limit)) {
+            executeWithRetry("files.export(" + id + ")", () -> {
+                getDrive().files().export(id, mimeType).executeMediaAndDownloadTo(out);
+                return Boolean.TRUE;
+            });
             return out.toString(Constants.UTF_8);
+        } catch (final ExportSizeLimitExceededException e) {
+            logger.warn("Skipped the content of {}: the {} export is larger than the {} byte limit of files.export.", id, mimeType,
+                    Long.valueOf(limit));
+            throw new MaxLengthExceededException(
+                    "The " + mimeType + " export of " + id + " is larger than the " + limit + " byte limit of files.export.");
         } catch (final Exception e) {
             throw new CrawlingAccessException("Failed to extract a text from " + id, e);
         }
@@ -939,7 +1030,12 @@ public class GSuiteClient implements AutoCloseable {
     public InputStream getFileInputStream(final String id) {
         try (final DeferredFileOutputStream dfos =
                 new DeferredFileOutputStream(maxCachedContentSize, "crawler-GSuiteClient-", ".out", SystemUtils.getJavaIoTmpDir())) {
-            newFileGetRequest(id).executeMediaAndDownloadTo(dfos);
+            // A retry only ever happens on a status the request failed with, which the client raises
+            // before a single byte is written, so the buffer never accumulates two attempts.
+            executeWithRetry("files.get(" + id + ")", () -> {
+                newFileGetRequest(id).executeMediaAndDownloadTo(dfos);
+                return Boolean.TRUE;
+            });
             dfos.flush();
 
             if (dfos.isInMemory()) {
