@@ -364,6 +364,10 @@ public class GSuiteClient implements AutoCloseable {
 
     /**
      * Extracts the text from a file.
+     * <p>
+     * Note that {@code files.export} has no {@code supportsAllDrives} parameter in the Drive v3
+     * API, so unlike {@code files.get} this request cannot opt into shared drive support.
+     * </p>
      * @param id The ID of the file.
      * @param mimeType The mime type of the file.
      * @return The text of the file.
@@ -385,7 +389,7 @@ public class GSuiteClient implements AutoCloseable {
     public InputStream getFileInputStream(final String id) {
         try (final DeferredFileOutputStream dfos =
                 new DeferredFileOutputStream(maxCachedContentSize, "crawler-GSuiteClient-", ".out", SystemUtils.getJavaIoTmpDir())) {
-            getDrive().files().get(id).executeMediaAndDownloadTo(dfos);
+            newFileGetRequest(id).executeMediaAndDownloadTo(dfos);
             dfos.flush();
 
             if (dfos.isInMemory()) {
@@ -395,6 +399,20 @@ public class GSuiteClient implements AutoCloseable {
         } catch (final Exception e) {
             throw new CrawlingAccessException("Failed to create an input stream from " + id, e);
         }
+    }
+
+    /**
+     * Creates a files.get request for the given file.
+     * <p>
+     * {@code supportsAllDrives=true} is required for any item that lives on a shared drive;
+     * without it Drive rejects the request for those items.
+     * </p>
+     * @param id The ID of the file.
+     * @return The files.get request.
+     * @throws IOException If the request cannot be created.
+     */
+    protected Drive.Files.Get newFileGetRequest(final String id) throws IOException {
+        return getDrive().files().get(id).setSupportsAllDrives(Boolean.TRUE);
     }
 
     /**

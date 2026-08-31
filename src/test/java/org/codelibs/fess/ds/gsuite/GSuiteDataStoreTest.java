@@ -23,6 +23,8 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 
 import org.codelibs.fess.entity.DataStoreParams;
+import org.codelibs.fess.helper.PermissionHelper;
+import org.codelibs.fess.helper.SystemHelper;
 import org.codelibs.fess.util.ComponentUtil;
 import org.codelibs.fess.ds.gsuite.UnitDsTestCase;
 
@@ -182,31 +184,43 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         permission.setType("user");
         permission.setEmailAddress("user@example.com");
         permission.setDeleted(true);
-        final String result = dataStore.getPermission(permission);
+        final String result = dataStore.getPermission(new DataStoreParams(), permission);
         assertNull(result);
     }
 
     @Test
-    public void testGetUrl_WithWebContentLink() {
+    public void testGetUrl_WithWebViewLink() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
-        file.setWebContentLink("https://drive.google.com/file/d/abc123/view");
+        file.setWebViewLink("https://drive.google.com/file/d/abc123/view?usp=drivesdk");
+        file.setWebContentLink("https://drive.google.com/uc?id=abc123&export=download");
         file.setId("abc123");
         final String url = dataStore.getUrl(null, params, file);
-        assertEquals("https://drive.google.com/file/d/abc123/view", url);
+        assertEquals("https://drive.google.com/file/d/abc123/view?usp=drivesdk", url);
     }
 
     @Test
-    public void testGetUrl_WithoutWebContentLink() {
+    public void testGetUrl_WithoutWebViewLink() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
+        file.setWebContentLink("https://drive.google.com/uc?id=abc123&export=download");
         file.setId("abc123");
         final String url = dataStore.getUrl(null, params, file);
-        assertEquals("https://drive.google.com/uc?id=abc123&export=download", url);
+        assertEquals("https://drive.google.com/open?id=abc123", url);
     }
 
     @Test
-    public void testGetUrl_WithoutWebContentLinkAndId() {
+    public void testGetUrl_WithBlankWebViewLink() {
+        final DataStoreParams params = new DataStoreParams();
+        final File file = new File();
+        file.setWebViewLink("   ");
+        file.setId("abc123");
+        final String url = dataStore.getUrl(null, params, file);
+        assertEquals("https://drive.google.com/open?id=abc123", url);
+    }
+
+    @Test
+    public void testGetUrl_WithoutWebViewLinkAndId() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
         final String url = dataStore.getUrl(null, params, file);
@@ -216,7 +230,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     @Test
     public void testGetFilePermissions_WithNullPermissionsAndOwners() {
         final File file = new File();
-        final List<String> permissions = dataStore.getFilePermissions(null, file);
+        final List<String> permissions = dataStore.getFilePermissions(null, new DataStoreParams(), file);
         assertNotNull(permissions);
         assertEquals(0, permissions.size());
     }
@@ -284,4 +298,177 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
     // Note: buildFileMap() tests are omitted as they require integration test environment
     // with ComponentUtil dependencies (FileTypeHelper) which are not available in unit tests.
     // The functionality is covered by integration tests.
+
+    /**
+     * Registers a SystemHelper whose search-role prefixes are fixed, so the assertions do not
+     * depend on a FessConfig being available in the unit-test container. The prefixes returned
+     * here state the real contract explicitly: {@code SystemHelper#getSearchRoleByUser}/
+     * {@code getSearchRoleByGroup}/{@code getSearchRoleByRole} return PREFIX-form roles built by
+     * {@code SystemHelper#buildSearchRole(type, name)} as {@code type + name} (e.g.
+     * {@code "1alice@example.com"}), using the {@code fess_config.properties} defaults
+     * {@code role.search.user.prefix=1}, {@code role.search.group.prefix=2},
+     * {@code role.search.role.prefix=R}. The {@code {user}}/{@code {group}}/{@code {role}}
+     * bracket notation is only the INPUT syntax {@code PermissionHelper#encode()} accepts; it is
+     * never what these methods return, so this stub does not use it.
+     */
+    private void registerStubSystemHelper() {
+        ComponentUtil.register(new SystemHelper() {
+            @Override
+            public String getSearchRoleByUser(final String name) {
+                return "1" + name;
+            }
+
+            @Override
+            public String getSearchRoleByGroup(final String name) {
+                return "2" + name;
+            }
+
+            @Override
+            public String getSearchRoleByRole(final String name) {
+                return "R" + name;
+            }
+        }, "systemHelper");
+    }
+
+    /**
+     * Registers a PermissionHelper whose encode() mimics the real contract without needing a
+     * FessConfig in the unit-test container. In production, {@code encode} treats
+     * {@code {user}}/{@code {group}}/{@code {role}} as INPUT notation and resolves the remainder
+     * through {@code SystemHelper#getSearchRoleByUser}/{@code getSearchRoleByGroup}/
+     * {@code getSearchRoleByRole}; this stub maps those same three prefixes to the same
+     * PREFIX-form roles as {@link #registerStubSystemHelper()} ("1"/"2"/"R" + name), and returns
+     * null - never a bogus role - when a recognized prefix has nothing usable following it, or
+     * the input is blank, matching {@code PermissionHelper#encode}'s own contract.
+     */
+    private void registerStubPermissionHelper() {
+        ComponentUtil.register(new PermissionHelper() {
+            @Override
+            public String encode(final String value) {
+                if (value == null || value.isEmpty()) {
+                    return null;
+                }
+                if (value.startsWith("{user}")) {
+                    final String name = value.substring("{user}".length());
+                    return name.isEmpty() ? null : "1" + name;
+                }
+                if (value.startsWith("{group}")) {
+                    final String name = value.substring("{group}".length());
+                    return name.isEmpty() ? null : "2" + name;
+                }
+                if (value.startsWith("{role}")) {
+                    final String name = value.substring("{role}".length());
+                    return name.isEmpty() ? null : "R" + name;
+                }
+                return value;
+            }
+        }, "permissionHelper");
+    }
+
+    @Test
+    public void test_getPermission_anyoneIsGuestRole() {
+        registerStubSystemHelper();
+        assertEquals("Rguest", dataStore.getPermission("anyone", "anyone"));
+    }
+
+    @Test
+    public void test_getPermission_anyoneWithoutEmailAddress() {
+        registerStubSystemHelper();
+        // A type=anyone Permission carries no emailAddress, so the null value must not short-circuit.
+        assertEquals("Rguest", dataStore.getPermission("anyone", null));
+    }
+
+    @Test
+    public void test_getPermission_userIsStillUserRole() {
+        registerStubSystemHelper();
+        assertEquals("1alice@example.com", dataStore.getPermission("user", "alice@example.com"));
+    }
+
+    @Test
+    public void test_getPermission_groupIsStillGroupRole() {
+        registerStubSystemHelper();
+        assertEquals("2team@example.com", dataStore.getPermission("group", "team@example.com"));
+    }
+
+    @Test
+    public void test_getPermission_domainUsesDomainField() {
+        registerStubPermissionHelper();
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        // Default format "{group}{domain}" substitutes to "{group}example.com", which is then
+        // encoded (PermissionHelper#encode) into the group PREFIX-form role, not left literal.
+        assertEquals("2example.com", dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getPermission_domainWithCustomFormat() {
+        registerStubPermissionHelper();
+        final DataStoreParams params = new DataStoreParams();
+        params.put("domain_permission_format", "{role}drive-{domain}");
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        // A {role}-typed format is encoded into the role PREFIX-form too, proving encode() is
+        // applied regardless of which of the three notations the format uses.
+        assertEquals("Rdrive-example.com", dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getPermission_domainWithoutDomainValueIsSkipped() {
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setEmailAddress("someone@example.com");
+        assertNull(dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getPermission_deletedDomainPermissionIsSkipped() {
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        permission.setDeleted(true);
+        assertNull(dataStore.getPermission(params, permission));
+    }
+
+    @Test
+    public void test_getFilePermissions_includesDomainPermission() {
+        registerStubPermissionHelper();
+        final DataStoreParams params = new DataStoreParams();
+        final Permission permission = new Permission();
+        permission.setType("domain");
+        permission.setDomain("example.com");
+        final File file = new File();
+        file.setPermissions(java.util.Collections.singletonList(permission));
+        final List<String> roles = dataStore.getFilePermissions(null, params, file);
+        assertEquals(1, roles.size());
+        assertEquals("2example.com", roles.get(0));
+    }
+
+    @Test
+    public void test_getDomainPermission_blankDomain() {
+        final DataStoreParams params = new DataStoreParams();
+        assertNull(dataStore.getDomainPermission(params, null));
+        assertNull(dataStore.getDomainPermission(params, ""));
+        assertNull(dataStore.getDomainPermission(params, "   "));
+    }
+
+    @Test
+    public void test_getDomainPermission_formatYieldingNothingUsableIsNull() {
+        registerStubPermissionHelper();
+        final DataStoreParams params = new DataStoreParams();
+        // No "{domain}" token in the format, so the domain name never gets embedded and the
+        // substituted value is the bare "{group}" prefix with nothing following it - encode()
+        // cannot turn that into a role, so the method must return null, not a bogus string.
+        params.put("domain_permission_format", "{group}");
+        assertNull(dataStore.getDomainPermission(params, "example.com"));
+    }
+
+    @Test
+    public void test_domainPermissionFormatConstants() {
+        assertEquals("domain_permission_format", GoogleDriveDataStore.DOMAIN_PERMISSION_FORMAT);
+        assertEquals("{group}{domain}", GoogleDriveDataStore.DEFAULT_DOMAIN_PERMISSION_FORMAT);
+    }
 }

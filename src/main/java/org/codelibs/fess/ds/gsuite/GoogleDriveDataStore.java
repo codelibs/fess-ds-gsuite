@@ -93,6 +93,33 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String DEFAULT_PERMISSIONS = "default_permissions";
     /** Parameter key for the number of threads. */
     protected static final String NUMBER_OF_THREADS = "number_of_threads";
+    /** Parameter key for the thread pool termination timeout in seconds. */
+    protected static final String THREAD_POOL_TIMEOUT_SECONDS = "thread_pool_timeout_seconds";
+    /**
+     * Parameter key for the role format applied to a domain-wide permission. The value is
+     * {@code {domain}}-substituted and then passed through
+     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, so it accepts the same
+     * {@code {user}}/{@code {group}}/{@code {role}} input notation as {@link #DEFAULT_PERMISSIONS}.
+     */
+    protected static final String DOMAIN_PERMISSION_FORMAT = "domain_permission_format";
+
+    /**
+     * Default role format for a domain-wide permission. {@code {domain}} is replaced with the
+     * domain name and the result is encoded via
+     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, so {@code {group}} here
+     * is the same INPUT notation {@code encode} accepts for {@link #DEFAULT_PERMISSIONS}, not a
+     * literal string that reaches the index.
+     */
+    protected static final String DEFAULT_DOMAIN_PERMISSION_FORMAT = "{group}{domain}";
+
+    /**
+     * Parameter keys that carry service account credentials and must never reach the script
+     * evaluation context, since a script value can be indexed and read back by anyone with search
+     * access. This is the single place to add a key if a later phase introduces another secret
+     * parameter.
+     */
+    protected static final String[] SECRET_PARAM_KEYS =
+            { GSuiteClient.PRIVATE_KEY_PARAM, GSuiteClient.PRIVATE_KEY_ID_PARAM, GSuiteClient.CLIENT_EMAIL_PARAM };
 
     // scripts
     /** Script key for the file object. */
@@ -282,6 +309,20 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Returns how long to wait for the crawler thread pool to drain, in seconds.
+     * @param paramMap The parameters for the data store.
+     * @return The timeout in seconds.
+     */
+    protected long getThreadPoolTimeoutSeconds(final DataStoreParams paramMap) {
+        final String value = paramMap.getAsString(THREAD_POOL_TIMEOUT_SECONDS);
+        try {
+            return StringUtil.isNotBlank(value) ? Long.parseLong(value) : DEFAULT_THREAD_POOL_TIMEOUT_SECONDS;
+        } catch (final NumberFormatException e) {
+            return DEFAULT_THREAD_POOL_TIMEOUT_SECONDS;
+        }
+    }
+
+    /**
      * Returns the URL filter.
      * @param paramMap The parameters for the data store.
      * @return The URL filter.
@@ -346,6 +387,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
         try {
             client.getFiles(query, corpora, spaces, fields, file -> {
+                if (!alive) {
+                    // The admin UI asked this data store to stop; do not queue any more work.
+                    if (logger.isDebugEnabled()) {
+                        logger.debug("Crawling is stopped. Skipping {}.", file.getId());
+                    }
+                    return;
+                }
                 executorService
                         .execute(() -> processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file));
 
@@ -354,7 +402,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 logger.debug("Shutting down thread executor.");
             }
             executorService.shutdown();
-            executorService.awaitTermination(DEFAULT_THREAD_POOL_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            executorService.awaitTermination(getThreadPoolTimeoutSeconds(paramMap), TimeUnit.SECONDS);
         } catch (final InterruptedException e) {
             throw new InterruptedRuntimeException(e);
         } finally {
@@ -533,10 +581,15 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Processes a file.
+     * <p>
+     * The stats key and everything derived from it go on a per-call copy of {@code paramMap};
+     * this method runs on the crawler thread pool and the caller's instance is shared by every
+     * thread, so writing to it races when {@code number_of_threads} is greater than 1.
+     * </p>
      * @param dataConfig The data configuration.
      * @param callback The callback to index the file.
      * @param configMap The configuration map.
-     * @param paramMap The parameters for the data store.
+     * @param paramMap The parameters for the data store. Treated as read-only.
      * @param scriptMap The script map.
      * @param defaultDataMap The default data map.
      * @param client The GSuiteClient.
@@ -545,51 +598,72 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected void processFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final File file) {
+        if (!alive) {
+            // Work already queued when the stop request arrived must be dropped, not indexed.
+            if (logger.isDebugEnabled()) {
+                logger.debug("Crawling is stopped. Skipping {}.", file.getId());
+            }
+            return;
+        }
         final CrawlerStatsHelper crawlerStatsHelper = ComponentUtil.getCrawlerStatsHelper();
         if (logger.isDebugEnabled()) {
             logger.debug("file: {}", file);
         }
         final StatsKeyObject statsKey = new StatsKeyObject(file.getId());
-        paramMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
+        final DataStoreParams localParamMap = paramMap.newInstance();
+        localParamMap.put(Constants.CRAWLER_STATS_KEY, statsKey);
         final Map<String, Object> dataMap = new HashMap<>(defaultDataMap);
         try {
             crawlerStatsHelper.begin(statsKey);
 
             // Check if file should be processed (folder filtering, MIME type, URL filter)
-            if (!shouldProcessFile(file, configMap, paramMap, statsKey, crawlerStatsHelper)) {
+            if (!shouldProcessFile(file, configMap, localParamMap, statsKey, crawlerStatsHelper)) {
                 return;
             }
 
-            final String url = getUrl(configMap, paramMap, file);
+            final String url = getUrl(configMap, localParamMap, file);
             logger.info("Crawling URL: {}", url);
 
             final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
 
-            final Map<String, Object> resultMap = new LinkedHashMap<>(paramMap.asMap());
+            // The script context is evaluated with arbitrary user-supplied expressions and its values
+            // can be indexed, so the service account credentials must never reach it.
+            final Map<String, Object> resultMap = new LinkedHashMap<>(localParamMap.asMap());
+            for (final String secretKey : SECRET_PARAM_KEYS) {
+                resultMap.remove(secretKey);
+            }
+
+            // Check the size Drive reports before spending a download and a Tika extraction on it
+            final long maxSize = ((Long) configMap.get(MAX_SIZE)).longValue();
+            final Long declaredSize = file.getSize();
+            if (declaredSize != null && declaredSize.longValue() > maxSize) {
+                throw new MaxLengthExceededException(
+                        "The content length (" + declaredSize + " byte) is over " + maxSize + " byte. The url is " + url);
+            }
 
             // Extract file content
             final String content = getFileContents(client, file, ignoreError);
             final long size;
-            if (file.getSize() != null) {
-                size = file.getSize();
+            if (declaredSize != null) {
+                size = declaredSize.longValue();
             } else if (content != null) {
                 size = content.length();
             } else {
                 size = 0;
             }
 
-            // Check file size
-            if (size > ((Long) configMap.get(MAX_SIZE)).longValue()) {
+            // Google native formats report no size, so they can only be checked after extraction
+            if (declaredSize == null && size > maxSize) {
                 throw new MaxLengthExceededException(
-                        "The content length (" + size + " byte) is over " + configMap.get(MAX_SIZE) + " byte. The url is " + url);
+                        "The content length (" + size + " byte) is over " + maxSize + " byte. The url is " + url);
             }
 
             // Build file metadata map
             final Map<String, Object> fileMap = buildFileMap(file, content, size, url);
 
-            final List<String> permissions = getFilePermissions(client, file);
+            final List<String> permissions = getFilePermissions(client, localParamMap, file);
             final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
-            StreamUtil.split(paramMap.getAsString(DEFAULT_PERMISSIONS), ",")
+            StreamUtil.split(localParamMap.getAsString(DEFAULT_PERMISSIONS), ",")
                     .of(stream -> stream.filter(StringUtil::isNotBlank).map(permissionHelper::encode).forEach(permissions::add));
             fileMap.put(FILE_ROLES, permissions);
 
@@ -601,7 +675,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 logger.debug("fileMap: {}", fileMap);
             }
 
-            final String scriptType = getScriptType(paramMap);
+            final String scriptType = getScriptType(localParamMap);
             for (final Map.Entry<String, String> entry : scriptMap.entrySet()) {
                 final Object convertValue = convertValue(scriptType, entry.getValue(), resultMap);
                 if (convertValue != null) {
@@ -619,10 +693,10 @@ public class GoogleDriveDataStore extends AbstractDataStore {
                 statsKey.setUrl(statsUrl);
             }
 
-            callback.store(paramMap, dataMap);
+            callback.store(localParamMap, dataMap);
             crawlerStatsHelper.record(statsKey, StatsAction.FINISHED);
         } catch (final Throwable t) {
-            handleProcessingError(dataConfig, file, configMap, paramMap, dataMap, statsKey, crawlerStatsHelper, t);
+            handleProcessingError(dataConfig, file, configMap, localParamMap, dataMap, statsKey, crawlerStatsHelper, t);
         } finally {
             crawlerStatsHelper.done(statsKey);
         }
@@ -643,13 +717,14 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     /**
      * Returns the permissions for a file.
      * @param client The GSuiteClient.
+     * @param paramMap The parameters for the data store.
      * @param file The file.
      * @return The permissions for the file.
      */
-    protected List<String> getFilePermissions(final GSuiteClient client, final File file) {
+    protected List<String> getFilePermissions(final GSuiteClient client, final DataStoreParams paramMap, final File file) {
         final List<String> permissionList = new ArrayList<>();
         if (file.getPermissions() != null) {
-            file.getPermissions().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
+            file.getPermissions().stream().map(p -> getPermission(paramMap, p)).filter(s -> s != null).forEach(permissionList::add);
         }
         if (file.getOwners() != null) {
             file.getOwners().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
@@ -671,60 +746,110 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Returns the permission for a permission.
+     * <p>
+     * A {@code type=domain} permission carries its value in {@link Permission#getDomain()};
+     * {@link Permission#getEmailAddress()} is null for it, so it must not go through the
+     * email-address based path.
+     * </p>
+     * @param paramMap The parameters for the data store.
      * @param permission The permission.
      * @return The permission for the permission.
      */
-    protected String getPermission(final Permission permission) {
+    protected String getPermission(final DataStoreParams paramMap, final Permission permission) {
         if (logger.isDebugEnabled()) {
             logger.debug("permission: {}", permission);
         }
         if (Boolean.TRUE.equals(permission.getDeleted())) {
             return null;
         }
+        if ("domain".equals(permission.getType())) {
+            return getDomainPermission(paramMap, permission.getDomain());
+        }
         return getPermission(permission.getType(), permission.getEmailAddress());
     }
 
     /**
+     * Returns the role for a domain-wide permission.
+     * <p>
+     * The format comes from the {@code domain_permission_format} parameter, {@code {domain}} in
+     * it is replaced with the domain name, and the result is passed through
+     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, exactly like
+     * {@link #DEFAULT_PERMISSIONS} values are encoded in {@code processFile}. The
+     * {@code {user}}/{@code {group}}/{@code {role}} tokens in the format are therefore the same
+     * INPUT notation {@code encode} accepts, not a literal string that reaches the index.
+     * </p>
+     * @param paramMap The parameters for the data store.
+     * @param domain The domain name carried by the permission.
+     * @return The role, or null if the domain name is blank or the format does not encode to a usable role.
+     */
+    protected String getDomainPermission(final DataStoreParams paramMap, final String domain) {
+        if (StringUtil.isBlank(domain)) {
+            return null;
+        }
+        final String formatted =
+                paramMap.getAsString(DOMAIN_PERMISSION_FORMAT, DEFAULT_DOMAIN_PERMISSION_FORMAT).replace("{domain}", domain);
+        final String encoded = ComponentUtil.getPermissionHelper().encode(formatted);
+        if (StringUtil.isBlank(encoded)) {
+            return null;
+        }
+        return encoded;
+    }
+
+    /**
      * Returns the permission for a type and value.
+     * <p>
+     * A {@code type=anyone} permission carries no value at all, so it is resolved before the
+     * null check. Fess identifies the anonymous user with the guest <em>role</em>
+     * ({@code role.search.guest.permissions} defaults to <code>{role}guest</code>), not with a
+     * user named "guest". {@code type=domain} is not handled here because its value lives in
+     * {@link Permission#getDomain()}.
+     * </p>
      * @param type The type.
      * @param value The value.
      * @return The permission for the type and value.
      */
     protected String getPermission(final String type, final String value) {
+        if ("anyone".equals(type)) {
+            return ComponentUtil.getSystemHelper().getSearchRoleByRole("guest");
+        }
         if (value == null) {
             return null;
         }
         if ("user".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByUser(value);
         }
-        if ("group".equals(type) || "domain".equals(type)) {
+        if ("group".equals(type)) {
             return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
-        }
-        if ("anyone".equals(type)) {
-            return ComponentUtil.getSystemHelper().getSearchRoleByUser("guest");
         }
         return null;
     }
 
     /**
      * Returns the URL for a file.
+     * <p>
+     * {@code webViewLink} opens the file in a browser, which is what a search result must link to.
+     * {@code webContentLink} is a direct-download link and is not usable for every mime type, so it
+     * is no longer the default. When the file has no {@code webViewLink}, the canonical
+     * {@code https://drive.google.com/open?id=<id>} form is used instead.
+     * </p>
      * @param configMap The configuration map.
      * @param paramMap The parameters for the data store.
      * @param file The file.
-     * @return The URL for the file.
+     * @return The URL for the file, or null when neither a web view link nor an ID is available.
      */
     protected String getUrl(final Map<String, Object> configMap, final DataStoreParams paramMap, final File file) {
-        final String url = file.getWebContentLink();
-        if (StringUtil.isBlank(url)) {
-            final String id = file.getId();
-            if (StringUtil.isNotBlank(id)) {
-                return "https://drive.google.com/uc?id=" + id + "&export=download";
-            }
-            if (logger.isDebugEnabled()) {
-                logger.debug("id is null.");
-            }
+        final String webViewLink = file.getWebViewLink();
+        if (StringUtil.isNotBlank(webViewLink)) {
+            return webViewLink;
         }
-        return url;
+        final String id = file.getId();
+        if (StringUtil.isNotBlank(id)) {
+            return "https://drive.google.com/open?id=" + id;
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("id is null.");
+        }
+        return null;
     }
 
     /**
