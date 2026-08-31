@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -55,8 +56,6 @@ import org.codelibs.fess.util.ComponentUtil;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.services.drive.model.File;
-import com.google.api.services.drive.model.Permission;
-import com.google.api.services.drive.model.User;
 
 /**
  * DataStore for Google Drive.
@@ -111,6 +110,13 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * literal string that reaches the index.
      */
     protected static final String DEFAULT_DOMAIN_PERMISSION_FORMAT = "{group}{domain}";
+
+    /**
+     * Config map key holding one {@link DrivePermissionResolver} per {@link GSuiteClient}. The
+     * value is a map, not a single resolver, because the resolver caches shared drive ACLs and a
+     * crawl may run several clients.
+     */
+    protected static final String PERMISSION_RESOLVERS = "permission_resolvers";
 
     /**
      * Parameter keys that carry service account credentials and must never reach the script
@@ -258,6 +264,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         configMap.put(IGNORE_ERROR, isIgnoreError(paramMap));
         configMap.put(SUPPORTED_MIMETYPES, getSupportedMimeTypes(paramMap));
         configMap.put(URL_FILTER, getUrlFilter(paramMap));
+        configMap.put(PERMISSION_RESOLVERS, new ConcurrentHashMap<GSuiteClient, DrivePermissionResolver>());
         if (logger.isDebugEnabled()) {
             logger.debug("configMap: {}", configMap);
         }
@@ -622,6 +629,17 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             }
 
             final String url = getUrl(configMap, localParamMap, file);
+
+            // Resolve the ACL before downloading anything: a document that is going to be skipped
+            // must not cost an export or a Tika extraction.
+            final List<String> permissions = getFilePermissions(configMap, localParamMap, client, file);
+            if (permissions.isEmpty()) {
+                logger.warn("Skipped {} because no permission could be resolved. "
+                        + "Set default_permissions to index documents whose ACL is empty.", url);
+                crawlerStatsHelper.discard(statsKey);
+                return;
+            }
+
             logger.info("Crawling URL: {}", url);
 
             final boolean ignoreError = ((Boolean) configMap.get(IGNORE_ERROR));
@@ -660,11 +678,6 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
             // Build file metadata map
             final Map<String, Object> fileMap = buildFileMap(file, content, size, url);
-
-            final List<String> permissions = getFilePermissions(client, localParamMap, file);
-            final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
-            StreamUtil.split(localParamMap.getAsString(DEFAULT_PERMISSIONS), ",")
-                    .of(stream -> stream.filter(StringUtil::isNotBlank).map(permissionHelper::encode).forEach(permissions::add));
             fileMap.put(FILE_ROLES, permissions);
 
             resultMap.put(FILE, fileMap);
@@ -715,113 +728,52 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
-     * Returns the permissions for a file.
-     * @param client The GSuiteClient.
+     * Returns the search roles to attach to the given file, applying the fail-closed rule.
+     * <p>
+     * The resolved Drive ACL wins. When it is empty, {@link #DEFAULT_PERMISSIONS} is used instead
+     * -- it is a fallback, not an addition. When that is empty too the returned list is empty, and
+     * the caller must skip the document: indexing a document with no role at all disables the Fess
+     * permission filter for it and makes it visible to every user.
+     * </p>
+     * @param configMap The configuration map.
      * @param paramMap The parameters for the data store.
+     * @param client The client that produced the file.
      * @param file The file.
-     * @return The permissions for the file.
+     * @return The search roles. Never null, but possibly empty.
      */
-    protected List<String> getFilePermissions(final GSuiteClient client, final DataStoreParams paramMap, final File file) {
-        final List<String> permissionList = new ArrayList<>();
-        if (file.getPermissions() != null) {
-            file.getPermissions().stream().map(p -> getPermission(paramMap, p)).filter(s -> s != null).forEach(permissionList::add);
+    protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+            final GSuiteClient client, final File file) {
+        final List<String> permissions = new ArrayList<>(getPermissionResolver(configMap, client, paramMap).resolve(file));
+        if (!permissions.isEmpty()) {
+            return permissions;
         }
-        if (file.getOwners() != null) {
-            file.getOwners().stream().map(this::getPermission).filter(s -> s != null).forEach(permissionList::add);
-        }
-        return permissionList;
+        final PermissionHelper permissionHelper = ComponentUtil.getPermissionHelper();
+        StreamUtil.split(paramMap.getAsString(DEFAULT_PERMISSIONS), ",")
+                .of(stream -> stream.filter(StringUtil::isNotBlank)
+                        .map(permissionHelper::encode)
+                        .filter(StringUtil::isNotBlank)
+                        .forEach(permissions::add));
+        return permissions;
     }
 
     /**
-     * Returns the permission for a user.
-     * @param user The user.
-     * @return The permission for the user.
-     */
-    protected String getPermission(final User user) {
-        if (logger.isDebugEnabled()) {
-            logger.debug("user: {}", user);
-        }
-        return getPermission("user", user.getEmailAddress());
-    }
-
-    /**
-     * Returns the permission for a permission.
+     * Returns the resolver bound to the given client, creating it on first use.
      * <p>
-     * A {@code type=domain} permission carries its value in {@link Permission#getDomain()};
-     * {@link Permission#getEmailAddress()} is null for it, so it must not go through the
-     * email-address based path.
+     * The resolver is keyed by client because its shared drive ACL cache and its per-file
+     * {@code permissions.list} calls must run with the identity that fetched the file.
      * </p>
+     * @param configMap The configuration map, holding the resolver cache under
+     *            {@link #PERMISSION_RESOLVERS}.
+     * @param client The client. Must not be null.
      * @param paramMap The parameters for the data store.
-     * @param permission The permission.
-     * @return The permission for the permission.
+     * @return The resolver.
      */
-    protected String getPermission(final DataStoreParams paramMap, final Permission permission) {
-        if (logger.isDebugEnabled()) {
-            logger.debug("permission: {}", permission);
-        }
-        if (Boolean.TRUE.equals(permission.getDeleted())) {
-            return null;
-        }
-        if ("domain".equals(permission.getType())) {
-            return getDomainPermission(paramMap, permission.getDomain());
-        }
-        return getPermission(permission.getType(), permission.getEmailAddress());
-    }
-
-    /**
-     * Returns the role for a domain-wide permission.
-     * <p>
-     * The format comes from the {@code domain_permission_format} parameter, {@code {domain}} in
-     * it is replaced with the domain name, and the result is passed through
-     * {@link org.codelibs.fess.helper.PermissionHelper#encode(String)}, exactly like
-     * {@link #DEFAULT_PERMISSIONS} values are encoded in {@code processFile}. The
-     * {@code {user}}/{@code {group}}/{@code {role}} tokens in the format are therefore the same
-     * INPUT notation {@code encode} accepts, not a literal string that reaches the index.
-     * </p>
-     * @param paramMap The parameters for the data store.
-     * @param domain The domain name carried by the permission.
-     * @return The role, or null if the domain name is blank or the format does not encode to a usable role.
-     */
-    protected String getDomainPermission(final DataStoreParams paramMap, final String domain) {
-        if (StringUtil.isBlank(domain)) {
-            return null;
-        }
-        final String formatted =
-                paramMap.getAsString(DOMAIN_PERMISSION_FORMAT, DEFAULT_DOMAIN_PERMISSION_FORMAT).replace("{domain}", domain);
-        final String encoded = ComponentUtil.getPermissionHelper().encode(formatted);
-        if (StringUtil.isBlank(encoded)) {
-            return null;
-        }
-        return encoded;
-    }
-
-    /**
-     * Returns the permission for a type and value.
-     * <p>
-     * A {@code type=anyone} permission carries no value at all, so it is resolved before the
-     * null check. Fess identifies the anonymous user with the guest <em>role</em>
-     * ({@code role.search.guest.permissions} defaults to <code>{role}guest</code>), not with a
-     * user named "guest". {@code type=domain} is not handled here because its value lives in
-     * {@link Permission#getDomain()}.
-     * </p>
-     * @param type The type.
-     * @param value The value.
-     * @return The permission for the type and value.
-     */
-    protected String getPermission(final String type, final String value) {
-        if ("anyone".equals(type)) {
-            return ComponentUtil.getSystemHelper().getSearchRoleByRole("guest");
-        }
-        if (value == null) {
-            return null;
-        }
-        if ("user".equals(type)) {
-            return ComponentUtil.getSystemHelper().getSearchRoleByUser(value);
-        }
-        if ("group".equals(type)) {
-            return ComponentUtil.getSystemHelper().getSearchRoleByGroup(value);
-        }
-        return null;
+    protected DrivePermissionResolver getPermissionResolver(final Map<String, Object> configMap, final GSuiteClient client,
+            final DataStoreParams paramMap) {
+        @SuppressWarnings("unchecked")
+        final Map<GSuiteClient, DrivePermissionResolver> resolvers =
+                (Map<GSuiteClient, DrivePermissionResolver>) configMap.get(PERMISSION_RESOLVERS);
+        return resolvers.computeIfAbsent(client, c -> new DrivePermissionResolver(c, paramMap));
     }
 
     /**

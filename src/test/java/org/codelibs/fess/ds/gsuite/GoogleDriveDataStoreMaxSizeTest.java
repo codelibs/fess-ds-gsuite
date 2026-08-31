@@ -15,7 +15,9 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -102,6 +104,14 @@ public class GoogleDriveDataStoreMaxSizeTest extends UnitDsTestCase {
             protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
                 downloaded.set(true);
                 return content;
+            }
+
+            @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // These tests are about the size checks, not about the ACL: the file only needs a
+                // role so that the fail-closed rule does not skip it before the size is checked.
+                return Arrays.asList("1owner@example.com");
             }
 
             @Override

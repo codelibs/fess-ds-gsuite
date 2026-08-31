@@ -15,7 +15,9 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -88,6 +90,14 @@ public class GoogleDriveDataStoreParamMapTest extends UnitDsTestCase {
             }
 
             @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // This test is not about the ACL: the file only needs a role so that the
+                // fail-closed rule does not skip it.
+                return Arrays.asList("1owner@example.com");
+            }
+
+            @Override
             protected Object convertValue(final String scriptType, final String template, final Map<String, Object> resultMap) {
                 return null;
             }
@@ -119,6 +129,14 @@ public class GoogleDriveDataStoreParamMapTest extends UnitDsTestCase {
             @Override
             protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
                 return "hello world";
+            }
+
+            @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // This test is not about the ACL: the file only needs a role so that the
+                // fail-closed rule does not skip it.
+                return Arrays.asList("1owner@example.com");
             }
 
             @Override
