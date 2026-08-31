@@ -24,48 +24,39 @@ import java.net.Proxy;
 import java.security.KeyFactory;
 import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
-import java.security.interfaces.RSAPrivateKey;
 import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
-import java.util.Date;
+import java.util.Collection;
 import java.util.function.Consumer;
+import java.util.stream.Collectors;
 
 import org.apache.commons.io.output.DeferredFileOutputStream;
 import org.apache.commons.lang3.SystemUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codelibs.core.lang.StringUtil;
-import org.codelibs.core.timer.TimeoutManager;
-import org.codelibs.core.timer.TimeoutTarget;
-import org.codelibs.core.timer.TimeoutTask;
 import org.codelibs.fess.Constants;
 import org.codelibs.fess.crawler.exception.CrawlingAccessException;
 import org.codelibs.fess.crawler.util.TemporaryFileInputStream;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 
-import com.auth0.jwt.JWT;
-import com.auth0.jwt.algorithms.Algorithm;
-import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.api.client.googleapis.GoogleUtils;
-import com.google.api.client.http.GenericUrl;
-import com.google.api.client.http.HttpContent;
-import com.google.api.client.http.HttpRequest;
 import com.google.api.client.http.HttpRequestInitializer;
-import com.google.api.client.http.HttpResponse;
-import com.google.api.client.http.UrlEncodedContent;
+import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport.Builder;
-import com.google.api.client.json.jackson2.JacksonFactory;
-import com.google.api.client.util.GenericData;
+import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
 import com.google.api.services.drive.Drive.Files.List;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
+import com.google.auth.http.HttpCredentialsAdapter;
+import com.google.auth.oauth2.GoogleCredentials;
+import com.google.auth.oauth2.ServiceAccountCredentials;
 
 /**
  * A client for accessing Google Suite APIs.
@@ -92,6 +83,12 @@ public class GSuiteClient implements AutoCloseable {
     protected static final String REFRESH_TOKEN_INTERVAL = "refresh_token_interval";
     /** Parameter key for the maximum cached content size. */
     protected static final String MAX_CACHED_CONTENT_SIZE = "max_cached_content_size";
+    /** Parameter key for the OAuth scopes. */
+    protected static final String SCOPES = "scopes";
+    /** Parameter key for the user to impersonate via domain-wide delegation. */
+    protected static final String IMPERSONATE_USER = "impersonate_user";
+    /** Default OAuth scopes. Read-only, unlike the previous hardcoded read-write scope. */
+    protected static final String DEFAULT_SCOPES = "https://www.googleapis.com/auth/drive.readonly";
 
     /** Constant for all drives. */
     public static final String ALL_DRIVES = "allDrives";
@@ -108,7 +105,7 @@ public class GSuiteClient implements AutoCloseable {
     /** Default connect timeout in milliseconds (20 seconds). */
     protected static final int DEFAULT_CONNECT_TIMEOUT_MS = 20 * 1000;
 
-    /** JWT token validity duration in milliseconds (1 hour). */
+    /** JWT token validity duration in milliseconds (1 hour), kept for API compatibility. */
     protected static final long JWT_TOKEN_VALIDITY_MS = 3600000L;
 
     /** Pattern for cleaning up PEM-encoded private keys (removes headers, footers, and newlines). */
@@ -117,44 +114,65 @@ public class GSuiteClient implements AutoCloseable {
     /** The Google Drive client. */
     protected Drive drive;
     /** The HTTP transport. */
-    protected NetHttpTransport httpTransport;
+    protected HttpTransport httpTransport;
     /** The data store parameters. */
     protected DataStoreParams params;
 
     /** The maximum size of content to be cached in memory. */
     protected int maxCachedContentSize = DEFAULT_MAX_CACHED_CONTENT_SIZE;
 
+    /** The credentials for the service account. */
+    protected GoogleCredentials credentials;
     /** The request initializer. */
-    protected RequestInitializer requestInitializer;
-
-    /** The task for refreshing the access token. */
-    protected TimeoutTask refreshTokenTask;
+    protected HttpRequestInitializer requestInitializer;
+    /** The read timeout in milliseconds. */
+    protected int readTimeout = DEFAULT_READ_TIMEOUT_MS;
+    /** The connect timeout in milliseconds. */
+    protected int connectTimeout = DEFAULT_CONNECT_TIMEOUT_MS;
 
     /** The name of the application. */
     protected String applicationName = "Fess DataStore";
 
     /**
      * Constructs a new GSuiteClient.
+     *
      * @param params The data store parameters.
      */
     public GSuiteClient(final DataStoreParams params) {
+        this(params, null);
+    }
+
+    /**
+     * Constructs a new GSuiteClient with the given transport.
+     *
+     * @param params The data store parameters.
+     * @param httpTransport The HTTP transport, or {@code null} to create a new one.
+     */
+    protected GSuiteClient(final DataStoreParams params, final HttpTransport httpTransport) {
         this.params = params;
-        this.httpTransport = newHttpTransport();
+        this.httpTransport = httpTransport != null ? httpTransport : newHttpTransport();
         final String size = params.getAsString(MAX_CACHED_CONTENT_SIZE);
         if (StringUtil.isNotBlank(size)) {
             maxCachedContentSize = Integer.parseInt(size);
         }
-        requestInitializer = new RequestInitializer(params, httpTransport);
-        refreshTokenTask = TimeoutManager.getInstance()
-                .addTimeoutTarget(requestInitializer,
-                        Integer.parseInt(params.getAsString(REFRESH_TOKEN_INTERVAL, DEFAULT_REFRESH_TOKEN_INTERVAL)), true);
+        final String readTimeoutStr = params.getAsString(READ_TIMEOUT);
+        if (StringUtil.isNotBlank(readTimeoutStr)) {
+            readTimeout = Integer.parseInt(readTimeoutStr);
+        }
+        final String connectTimeoutStr = params.getAsString(CONNECT_TIMEOUT);
+        if (StringUtil.isNotBlank(connectTimeoutStr)) {
+            connectTimeout = Integer.parseInt(connectTimeoutStr);
+        }
+        if (StringUtil.isNotBlank(params.getAsString(REFRESH_TOKEN_INTERVAL))) {
+            logger.warn("{} is no longer used. Access tokens are refreshed by google-auth-library.", REFRESH_TOKEN_INTERVAL);
+        }
+        credentials = createCredentials();
+        requestInitializer = createRequestInitializer(credentials);
     }
 
     @Override
     public void close() {
-        if (refreshTokenTask != null) {
-            refreshTokenTask.cancel();
-        }
+        // nothing to release
     }
 
     /**
@@ -176,11 +194,108 @@ public class GSuiteClient implements AutoCloseable {
     }
 
     /**
+     * Returns the OAuth scopes.
+     * A blank (absent, empty, or whitespace-only) {@link #SCOPES} parameter falls back to
+     * {@link #DEFAULT_SCOPES}. If the parameter is present and non-blank but, after splitting on
+     * commas, trimming, and dropping blank entries, yields no usable scope (e.g. {@code ","}),
+     * a {@link DataStoreException} is thrown instead of silently returning an empty collection.
+     *
+     * @return The OAuth scopes.
+     */
+    protected Collection<String> getScopes() {
+        final String rawScopes = params.getAsString(SCOPES);
+        final String scopesValue = StringUtil.isBlank(rawScopes) ? DEFAULT_SCOPES : rawScopes;
+        final Collection<String> scopes =
+                Arrays.stream(scopesValue.split(",")).map(String::trim).filter(StringUtil::isNotBlank).collect(Collectors.toList());
+        if (scopes.isEmpty()) {
+            throw new DataStoreException("parameter '" + SCOPES + "' must specify at least one scope");
+        }
+        return scopes;
+    }
+
+    /**
+     * Creates credentials for the service account.
+     *
+     * @return The credentials.
+     */
+    protected GoogleCredentials createCredentials() {
+        final String privateKeyPem = params.getAsString(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
+        final String privateKeyId = params.getAsString(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
+        final String clientEmail = params.getAsString(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
+        if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
+            throw new DataStoreException("parameter '" + //
+                    PRIVATE_KEY_PARAM + "', '" + //
+                    PRIVATE_KEY_ID_PARAM + "', '" + //
+                    CLIENT_EMAIL_PARAM + "' is required");
+        }
+        try {
+            final ServiceAccountCredentials serviceAccountCredentials = ServiceAccountCredentials.newBuilder()
+                    .setClientEmail(clientEmail)
+                    .setPrivateKeyId(privateKeyId)
+                    .setPrivateKey(parsePrivateKey(privateKeyPem))
+                    .setScopes(getScopes())
+                    .setHttpTransportFactory(() -> httpTransport)
+                    .build();
+            final String impersonateUser = params.getAsString(IMPERSONATE_USER);
+            if (StringUtil.isNotBlank(impersonateUser)) {
+                return serviceAccountCredentials.createDelegated(impersonateUser);
+            }
+            return serviceAccountCredentials;
+        } catch (final DataStoreException e) {
+            throw e;
+        } catch (final Exception e) {
+            throw new DataStoreException("Failed to create credentials for " + clientEmail, e);
+        }
+    }
+
+    /**
+     * Creates a request initializer that attaches the OAuth token and the configured timeouts.
+     *
+     * @param googleCredentials The credentials.
+     * @return The request initializer.
+     */
+    protected HttpRequestInitializer createRequestInitializer(final GoogleCredentials googleCredentials) {
+        final HttpCredentialsAdapter adapter = new HttpCredentialsAdapter(googleCredentials);
+        return request -> {
+            adapter.initialize(request);
+            request.setReadTimeout(readTimeout);
+            request.setConnectTimeout(connectTimeout);
+        };
+    }
+
+    /**
+     * Parses a PEM-encoded PKCS8 private key.
+     *
+     * @param privateKeyPem The PEM text. Both escaped and real newlines are accepted.
+     * @return The private key.
+     * @throws NoSuchAlgorithmException If RSA is unavailable.
+     * @throws InvalidKeySpecException If the key is invalid.
+     */
+    protected static PrivateKey parsePrivateKey(final String privateKeyPem) throws NoSuchAlgorithmException, InvalidKeySpecException {
+        try {
+            final String replaced = privateKeyPem.replaceAll(PEM_CLEANUP_PATTERN, StringUtil.EMPTY).trim();
+            if (replaced.isEmpty()) {
+                throw new IllegalArgumentException("Private key content is empty after removing PEM headers");
+            }
+            final byte[] bytes = Base64.getDecoder().decode(replaced);
+            if (bytes.length == 0) {
+                throw new IllegalArgumentException("Decoded private key has zero length");
+            }
+            final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
+            final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
+            return keyFactory.generatePrivate(keySpec);
+        } catch (final IllegalArgumentException e) {
+            throw new InvalidKeySpecException("Failed to decode private key: " + e.getMessage(), e);
+        }
+    }
+
+    /**
      * Creates a new Drive client.
+     *
      * @return A new Drive client.
      */
     protected Drive createGlobalDrive() {
-        return new Drive.Builder(httpTransport, new JacksonFactory(), requestInitializer)//
+        return new Drive.Builder(httpTransport, GsonFactory.getDefaultInstance(), requestInitializer)//
                 .setApplicationName(applicationName) //
                 .build();
     }
@@ -223,8 +338,8 @@ public class GSuiteClient implements AutoCloseable {
                     list.setCorpora(corpora);
                 }
                 if (ALL_DRIVES.equals(corpora)) {
-                    list.setIncludeTeamDriveItems(true);
-                    list.setSupportsTeamDrives(true);
+                    list.setIncludeItemsFromAllDrives(true);
+                    list.setSupportsAllDrives(true);
                 }
                 if (StringUtil.isNotBlank(spaces)) {
                     list.setSpaces(spaces);
@@ -280,215 +395,6 @@ public class GSuiteClient implements AutoCloseable {
         } catch (final Exception e) {
             throw new CrawlingAccessException("Failed to create an input stream from " + id, e);
         }
-    }
-
-    /**
-     * A response from the token endpoint.
-     */
-    @JsonIgnoreProperties(ignoreUnknown = true)
-    protected static class TokenResponse {
-        /**
-         * Default constructor.
-         */
-        public TokenResponse() {
-            // do nothing
-        }
-
-        @JsonProperty("access_token")
-        private String accessToken;
-        @JsonProperty("expires_in")
-        private Integer expiresIn;
-        @JsonProperty("token_type")
-        private String tokenType;
-        private String error;
-        @JsonProperty("error_description")
-        private String errorDescription;
-
-        String getAccessToken() {
-            return accessToken;
-        }
-
-        Integer getExpiresIn() {
-            return expiresIn;
-        }
-
-        String getTokenType() {
-            return tokenType;
-        }
-
-        String getError() {
-            return error;
-        }
-
-        String getErrorDescription() {
-            return errorDescription;
-        }
-    }
-
-    /**
-     * A request initializer for Google Drive API requests.
-     */
-    protected static class RequestInitializer implements HttpRequestInitializer, TimeoutTarget {
-
-        /** The HTTP transport. */
-        protected NetHttpTransport httpTransport;
-
-        /** The private key in PEM format. */
-        protected String privateKeyPem;
-        /** The private key ID. */
-        protected String privateKeyId;
-        /** The client email. */
-        protected String clientEmail;
-        /** The access token. */
-        protected String accessToken;
-        /** The read timeout in milliseconds. */
-        protected int readTimeout = DEFAULT_READ_TIMEOUT_MS;
-        /** The connect timeout in milliseconds. */
-        protected int connectTimeout = DEFAULT_CONNECT_TIMEOUT_MS;
-
-        /**
-         * Constructs a new RequestInitializer.
-         * @param params The data store parameters.
-         * @param httpTransport The HTTP transport.
-         */
-        protected RequestInitializer(final DataStoreParams params, final NetHttpTransport httpTransport) {
-            this.httpTransport = httpTransport;
-
-            privateKeyPem = params.getAsString(PRIVATE_KEY_PARAM, StringUtil.EMPTY);
-            privateKeyId = params.getAsString(PRIVATE_KEY_ID_PARAM, StringUtil.EMPTY);
-            clientEmail = params.getAsString(CLIENT_EMAIL_PARAM, StringUtil.EMPTY);
-            if (privateKeyPem.isEmpty() || privateKeyId.isEmpty() || clientEmail.isEmpty()) {
-                throw new DataStoreException("parameter '" + //
-                        PRIVATE_KEY_PARAM + "', '" + //
-                        PRIVATE_KEY_ID_PARAM + "', '" + //
-                        CLIENT_EMAIL_PARAM + "' is required");
-            }
-            final String readTimeoutStr = params.getAsString(READ_TIMEOUT);
-            if (StringUtil.isNotBlank(readTimeoutStr)) {
-                readTimeout = Integer.parseInt(readTimeoutStr);
-            }
-            final String connectTimeoutStr = params.getAsString(CONNECT_TIMEOUT);
-            if (StringUtil.isNotBlank(connectTimeoutStr)) {
-                connectTimeout = Integer.parseInt(connectTimeoutStr);
-            }
-            refreshToken();
-        }
-
-        /**
-         * Refreshes the OAuth2 access token using JWT authentication.
-         * This method implements the Google OAuth2 service account flow:
-         * 1. Creates a JWT (JSON Web Token) signed with the service account's private key
-         * 2. Sends the JWT to Google's token endpoint
-         * 3. Receives and stores the access token for API requests
-         * The access token is automatically refreshed periodically based on the configured interval.
-         */
-        protected void refreshToken() {
-            if (httpTransport == null) {
-                return;
-            }
-            if (logger.isDebugEnabled()) {
-                logger.debug("Refreshing access token.");
-            }
-            final long now = System.currentTimeMillis();
-            try {
-                // Step 1: Create JWT (JSON Web Token) assertion
-                // The JWT includes service account credentials and requested scopes
-                final String jwt = JWT.create() //
-                        .withKeyId(privateKeyId) // Service account key ID
-                        .withIssuer(clientEmail) // Service account email (issuer)
-                        .withSubject(clientEmail) // Service account email (subject)
-                        .withAudience("https://www.googleapis.com/oauth2/v4/token") // Google's token endpoint
-                        .withClaim("scope", "https://www.googleapis.com/auth/drive") // Request Drive API access
-                        .withIssuedAt(new Date(now)) // Current timestamp
-                        .withExpiresAt(new Date(now + JWT_TOKEN_VALIDITY_MS)) // JWT expires in 1 hour
-                        .sign(Algorithm.RSA256(null, (RSAPrivateKey) getPrivateKey())); // Sign with private key
-                if (logger.isDebugEnabled()) {
-                    logger.debug("jwt: {}", jwt);
-                }
-
-                // Step 2: Exchange JWT for access token
-                final GenericUrl url = new GenericUrl("https://www.googleapis.com/oauth2/v4/token");
-                final GenericData data = new GenericData();
-                data.set("assertion", jwt);
-                data.set("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer");
-                final HttpContent content = new UrlEncodedContent(data);
-                final HttpResponse response = httpTransport.createRequestFactory().buildPostRequest(url, content).execute();
-                if (logger.isDebugEnabled()) {
-                    logger.debug("response: {}", response);
-                }
-
-                // Step 3: Parse and store the access token
-                try {
-                    final ObjectMapper mapper = new ObjectMapper();
-                    final TokenResponse token = mapper.readValue(response.getContent(), TokenResponse.class);
-
-                    if (logger.isDebugEnabled()) {
-                        final String newToken = token.getAccessToken();
-                        logger.debug("Update: ***{} -> ***{}",
-                                accessToken != null ? accessToken.substring(accessToken.length() - Math.min(4, accessToken.length()))
-                                        : "null",
-                                newToken != null ? newToken.substring(newToken.length() - Math.min(4, newToken.length())) : "null");
-                    }
-                    accessToken = token.getAccessToken();
-                } finally {
-                    response.disconnect();
-                }
-            } catch (final Exception e) {
-                throw new DataStoreException("Failed to authorize GSuite API.", e);
-            }
-        }
-
-        /**
-         * Returns the private key.
-         * Parses a PEM-encoded private key by removing header/footer lines and newlines,
-         * then decoding the Base64 content into a PKCS8 key specification.
-         * @return The private key.
-         * @throws NoSuchAlgorithmException If the RSA algorithm is not available.
-         * @throws InvalidKeySpecException If the key specification is invalid.
-         * @throws IllegalArgumentException If the Base64 content is invalid.
-         */
-        protected PrivateKey getPrivateKey() throws NoSuchAlgorithmException, InvalidKeySpecException {
-            try {
-                // Remove PEM headers/footers (e.g., "-----BEGIN PRIVATE KEY-----")
-                // Also handle both escaped newlines (\n) and actual newlines
-                final String replaced = privateKeyPem.replaceAll(PEM_CLEANUP_PATTERN, StringUtil.EMPTY).trim();
-
-                if (replaced.isEmpty()) {
-                    throw new IllegalArgumentException("Private key content is empty after removing PEM headers");
-                }
-
-                // Decode Base64 content
-                final byte[] bytes = Base64.getDecoder().decode(replaced);
-
-                if (bytes.length == 0) {
-                    throw new IllegalArgumentException("Decoded private key has zero length");
-                }
-
-                // Create PKCS8 key specification and generate private key
-                final PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(bytes);
-                final KeyFactory keyFactory = SecurityUtils.getRsaKeyFactory();
-                return keyFactory.generatePrivate(keySpec);
-            } catch (final IllegalArgumentException e) {
-                throw new InvalidKeySpecException("Failed to decode private key: " + e.getMessage(), e);
-            }
-        }
-
-        @Override
-        public void expired() {
-            try {
-                refreshToken();
-            } catch (final Exception e) {
-                logger.warn("Failed to refresh an access token.", e);
-            }
-        }
-
-        @Override
-        public void initialize(final HttpRequest request) throws IOException {
-            request.getHeaders().setAuthorization("Bearer " + accessToken);
-            request.setReadTimeout(readTimeout);
-            request.setConnectTimeout(connectTimeout);
-        }
-
     }
 
     /**
