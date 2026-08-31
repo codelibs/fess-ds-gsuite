@@ -21,6 +21,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
+import org.codelibs.fess.Constants;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
@@ -313,5 +314,157 @@ public class GoogleDriveDataStoreScriptContextTest extends UnitDsTestCase {
 
         assertNull(capturedError.get());
         assertNull("the proxy password must be gone from the evaluation context entirely", capturedDigest.get());
+    }
+
+    /**
+     * The crawler stats key is bookkeeping for the crawl, not data about the file, so it must not
+     * appear in the script evaluation context. {@code AbstractDataStore#convertValue} returns a
+     * parameter verbatim when a script template matches its key exactly, so leaving it there lets
+     * {@code field=crawler.stats.key} index the {@link StatsKeyObject} instance itself.
+     * <p>
+     * It must still reach {@code callback.store}, which is where Fess core's
+     * {@code FileListIndexUpdateCallbackImpl} reads it from, so both halves are asserted here.
+     * </p>
+     */
+    @Test
+    public void test_processFile_stripsCrawlerStatsKeyFromScriptContext() {
+        registerHelpers();
+        final AtomicReference<Map<String, Object>> capturedResultMap = new AtomicReference<>();
+        final AtomicReference<DataStoreParams> capturedCallbackParams = new AtomicReference<>();
+        final AtomicReference<Throwable> capturedError = new AtomicReference<>();
+        final GoogleDriveDataStore dataStore = new GoogleDriveDataStore() {
+            @Override
+            protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
+                return "hello world";
+            }
+
+            @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // This test is not about the ACL: the file only needs a role so that the
+                // fail-closed rule does not skip it.
+                return Arrays.asList("1owner@example.com");
+            }
+
+            @Override
+            protected Object convertValue(final String scriptType, final String template, final Map<String, Object> resultMap) {
+                capturedResultMap.set(resultMap);
+                return null;
+            }
+
+            @Override
+            protected void handleProcessingError(final DataConfig dataConfig, final File file, final Map<String, Object> configMap,
+                    final DataStoreParams paramMap, final Map<String, Object> dataMap, final StatsKeyObject statsKey,
+                    final CrawlerStatsHelper crawlerStatsHelper, final Throwable t) {
+                capturedError.set(t);
+            }
+        };
+
+        final DataStoreParams paramMap = new DataStoreParams();
+        paramMap.put("max_size", "10000000");
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("digest", "name");
+
+        dataStore.processFile(null, new IndexUpdateCallback() {
+            @Override
+            public void store(final DataStoreParams p, final Map<String, Object> dataMap) {
+                capturedCallbackParams.set(p);
+            }
+
+            @Override
+            public long getDocumentSize() {
+                return 0;
+            }
+
+            @Override
+            public long getExecuteTime() {
+                return 0;
+            }
+
+            @Override
+            public void commit() {
+                // no-op
+            }
+        }, newConfigMap(), paramMap, scriptMap, new HashMap<>(), null, newFile());
+
+        assertNull(capturedError.get());
+        final Map<String, Object> resultMap = capturedResultMap.get();
+        assertNotNull(resultMap);
+        assertFalse(resultMap.containsKey(Constants.CRAWLER_STATS_KEY));
+        assertFalse(resultMap.values().stream().anyMatch(v -> v instanceof StatsKeyObject));
+        // Ordinary parameters must survive, so the script context stays usable.
+        assertEquals("10000000", resultMap.get("max_size"));
+        // The callback still needs the key: Fess core reads it from the parameters passed to store.
+        final DataStoreParams callbackParams = capturedCallbackParams.get();
+        assertNotNull(callbackParams);
+        assertTrue(callbackParams.get(Constants.CRAWLER_STATS_KEY) instanceof StatsKeyObject);
+    }
+
+    /**
+     * The behavioural half: a crawl script of {@code digest=crawler.stats.key} must index nothing
+     * rather than the {@link StatsKeyObject} instance.
+     */
+    @Test
+    public void test_processFile_scriptReferencingCrawlerStatsKeyResolvesToNull() {
+        registerHelpers();
+        final AtomicReference<Object> capturedDigest = new AtomicReference<>();
+        final AtomicReference<Throwable> capturedError = new AtomicReference<>();
+        final GoogleDriveDataStore dataStore = new GoogleDriveDataStore() {
+            @Override
+            protected String getFileContents(final GSuiteClient client, final File file, final boolean ignoreError) {
+                return "hello world";
+            }
+
+            @Override
+            protected List<String> getFilePermissions(final Map<String, Object> configMap, final DataStoreParams paramMap,
+                    final GSuiteClient client, final File file) {
+                // This test is not about the ACL: the file only needs a role so that the
+                // fail-closed rule does not skip it.
+                return Arrays.asList("1owner@example.com");
+            }
+
+            @Override
+            protected Object convertValue(final String scriptType, final String template, final Map<String, Object> resultMap) {
+                // Mirrors how the real script engine resolves a bare parameter-name expression:
+                // a direct key lookup against the evaluation context (resultMap).
+                return resultMap.get(template);
+            }
+
+            @Override
+            protected void handleProcessingError(final DataConfig dataConfig, final File file, final Map<String, Object> configMap,
+                    final DataStoreParams paramMap, final Map<String, Object> dataMap, final StatsKeyObject statsKey,
+                    final CrawlerStatsHelper crawlerStatsHelper, final Throwable t) {
+                capturedError.set(t);
+            }
+        };
+
+        final DataStoreParams paramMap = new DataStoreParams();
+        final Map<String, String> scriptMap = new HashMap<>();
+        scriptMap.put("digest", Constants.CRAWLER_STATS_KEY);
+
+        dataStore.processFile(null, new IndexUpdateCallback() {
+            @Override
+            public void store(final DataStoreParams p, final Map<String, Object> dataMap) {
+                capturedDigest.set(dataMap.get("digest"));
+            }
+
+            @Override
+            public long getDocumentSize() {
+                return 0;
+            }
+
+            @Override
+            public long getExecuteTime() {
+                return 0;
+            }
+
+            @Override
+            public void commit() {
+                // no-op
+            }
+        }, newConfigMap(), paramMap, scriptMap, new HashMap<>(), null, newFile());
+
+        assertNull(capturedError.get());
+        assertNull("the stats key must be gone from the evaluation context entirely", capturedDigest.get());
     }
 }

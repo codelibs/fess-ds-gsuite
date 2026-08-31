@@ -1390,6 +1390,12 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             for (final String secretKey : SECRET_PARAM_KEYS) {
                 resultMap.remove(secretKey);
             }
+            // The stats key is crawl bookkeeping, not data about the file. AbstractDataStore#convertValue
+            // returns a parameter verbatim when a script template matches its key exactly, so leaving it
+            // here lets a scriptMap entry of 'field=crawler.stats.key' index the StatsKeyObject itself;
+            // it is also bound into the script engine for every document. It stays on localParamMap,
+            // which is what callback.store reads it from.
+            resultMap.remove(Constants.CRAWLER_STATS_KEY);
 
             // Check the size Drive reports before spending a download and a Tika extraction on it
             final long maxSize = ((Long) configMap.get(MAX_SIZE)).longValue();
