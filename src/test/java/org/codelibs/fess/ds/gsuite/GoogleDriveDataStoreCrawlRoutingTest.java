@@ -15,6 +15,7 @@
  */
 package org.codelibs.fess.ds.gsuite;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -40,10 +41,14 @@ public class GoogleDriveDataStoreCrawlRoutingTest extends UnitDsTestCase {
     /** Ids of the files handed to processFile, in submission order. */
     private ConcurrentLinkedQueue<String> processed;
 
+    /** Targets handed to handleClientFailure, in report order. */
+    private ConcurrentLinkedQueue<String> failedTargets;
+
     @Override
     public void setUp(final TestInfo testInfo) throws Exception {
         super.setUp(testInfo);
         processed = new ConcurrentLinkedQueue<>();
+        failedTargets = new ConcurrentLinkedQueue<>();
     }
 
     @Override
@@ -116,6 +121,11 @@ public class GoogleDriveDataStoreCrawlRoutingTest extends UnitDsTestCase {
                     final GSuiteClient client, final File file) {
                 processed.add(file.getId());
             }
+
+            @Override
+            protected void handleClientFailure(final DataConfig dataConfig, final String target, final Exception e) {
+                failedTargets.add(target);
+            }
         };
     }
 
@@ -184,6 +194,26 @@ public class GoogleDriveDataStoreCrawlRoutingTest extends UnitDsTestCase {
             assertEquals(2, client.corporaCalls.size());
             assertEquals("user", client.corporaCalls.get(0));
             assertEquals("user", client.corporaCalls.get(1));
+        } finally {
+            client.close();
+        }
+    }
+
+    /**
+     * A Drive failure the client swallowed so that the crawl can continue must still reach
+     * handleClientFailure, or the operator sees a crawl that reports success while indexing nothing.
+     */
+    @Test
+    public void test_storeFiles_installsFailureHandlerOnTheClient() {
+        final MockHttpTransport transport = new MockHttpTransport();
+        final StubClient client =
+                new StubClient(newParams(), transport, new ArrayList<>(), Arrays.asList(new File().setId("d1")), new ArrayList<>());
+        try {
+            runStoreFiles("shared_drives", client);
+            assertEquals(1, processed.size());
+            client.failureHandler.accept("files.list(driveId=drive1)", new IOException("boom"));
+            assertEquals(1, failedTargets.size());
+            assertEquals("files.list(driveId=drive1)", failedTargets.peek());
         } finally {
             client.close();
         }

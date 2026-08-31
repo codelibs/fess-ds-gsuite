@@ -28,8 +28,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import org.apache.logging.log4j.LogManager;
@@ -72,8 +70,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     /** Default thread pool termination timeout in seconds. */
     protected static final long DEFAULT_THREAD_POOL_TIMEOUT_SECONDS = 60L;
 
-    /** Pattern for matching Google Apps MIME types. */
-    protected static final Pattern GOOGLE_APPS_MIMETYPE_PATTERN = Pattern.compile("application/vnd\\.google-apps\\.(.*)");
+    /** Mime type prefix shared by every native Google type, none of which can be downloaded with alt=media. */
+    protected static final String GOOGLE_APPS_MIMETYPE_PREFIX = "application/vnd.google-apps.";
+
+    /**
+     * The export targets preferred for each native Google type, most preferred first. Only a target
+     * that actually appears in the live exportFormats map is used, so this table never forces an
+     * unsupported conversion.
+     */
+    protected static final Map<String, List<String>> PREFERRED_EXPORT_MIMETYPES = Map.of(//
+            GOOGLE_APPS_MIMETYPE_PREFIX + "document", List.of("text/markdown", "text/plain", "text/html"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "spreadsheet", List.of("text/tab-separated-values", "text/csv"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "presentation", List.of("text/plain"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "drawing", List.of("image/png"), //
+            GOOGLE_APPS_MIMETYPE_PREFIX + "script", List.of("application/vnd.google-apps.script+json"));
+
+    /** The Apps Script export target, whose payload is a JSON bundle rather than text. */
+    protected static final String SCRIPT_EXPORT_MIMETYPE = "application/vnd.google-apps.script+json";
 
     // parameters
     /** Parameter key for the maximum file size. */
@@ -137,13 +150,17 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected static final String TARGET_BOTH = "both";
 
     /**
-     * Parameter keys that carry service account credentials and must never reach the script
-     * evaluation context, since a script value can be indexed and read back by anyone with search
-     * access. This is the single place to add a key if a later phase introduces another secret
-     * parameter.
+     * Parameter keys that carry credentials and must never reach the script evaluation context,
+     * since a script value can be indexed and read back by anyone with search access. This is the
+     * single place to add a key if a later phase introduces another secret parameter.
+     * <p>
+     * {@code proxy_username} is stripped alongside the password for the same reason
+     * {@code client_email} is: it is not a secret in itself, but it names an internal account and is
+     * half of a credential pair, which is not something a search result should disclose.
+     * </p>
      */
-    protected static final String[] SECRET_PARAM_KEYS =
-            { GSuiteClient.PRIVATE_KEY_PARAM, GSuiteClient.PRIVATE_KEY_ID_PARAM, GSuiteClient.CLIENT_EMAIL_PARAM };
+    protected static final String[] SECRET_PARAM_KEYS = { GSuiteClient.PRIVATE_KEY_PARAM, GSuiteClient.PRIVATE_KEY_ID_PARAM,
+            GSuiteClient.CLIENT_EMAIL_PARAM, GSuiteClient.PROXY_USERNAME, GSuiteClient.PROXY_PASSWORD };
 
     // scripts
     /** Script key for the file object. */
@@ -257,8 +274,30 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected String extractorName = "tikaExtractor";
 
     // other
-    /** The fields to retrieve for files. */
-    protected static final String FILE_FIELDS = "*";
+    /** Parameter key for the file field projection. */
+    protected static final String FIELDS = "fields";
+
+    /** The wildcard projection. Accepted but expensive: files.list then returns every field of every file. */
+    protected static final String WILDCARD_FIELDS = "*";
+
+    /**
+     * The default {@code files(...)} projection. It covers every getter {@code buildFileMap} reads plus
+     * the fields the ACL resolution, the index URL and the incremental crawl need. A field that is not
+     * listed here is null in the script context, which is why "*" stays available as an escape hatch.
+     * <p>
+     * {@code permissions}, {@code owners}, {@code driveId} and {@code hasAugmentedPermissions} carry
+     * the whole ACL: they feed the three tiers of {@link DrivePermissionResolver#resolve}, and
+     * dropping any of them silently strips the roles of every crawled document instead of failing.
+     * </p>
+     */
+    protected static final String DEFAULT_FILE_FIELDS = "id,name,description,mimeType,size,kind,fileExtension,fullFileExtension,"
+            + "originalFilename,md5Checksum,headRevisionId,iconLink,thumbnailLink,thumbnailVersion,hasThumbnail,webViewLink,"
+            + "webContentLink,exportLinks,createdTime,modifiedTime,modifiedByMe,modifiedByMeTime,viewedByMe,viewedByMeTime,"
+            + "trashed,explicitlyTrashed,trashedTime,trashingUser(emailAddress,displayName),parents,folderColorRgb,"
+            + "owners(emailAddress,displayName),ownedByMe,lastModifyingUser(emailAddress,displayName),shared,driveId,teamDriveId,"
+            + "permissions(id,type,role,emailAddress,domain,deleted,allowFileDiscovery,permissionDetails),permissionIds,"
+            + "hasAugmentedPermissions,capabilities,quotaBytesUsed,version,writersCanShare,viewersCanCopyContent,"
+            + "copyRequiresWriterPermission,isAppAuthorized,appProperties,contentHints,imageMediaMetadata,videoMediaMetadata";
 
     /**
      * Default constructor.
@@ -419,6 +458,43 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Returns the inner {@code files(...)} projection, that is the field list without the files.list
+     * envelope. changes.list needs this form because it nests the file under {@code changes(file(...))}.
+     *
+     * @param paramMap The parameters for the data store.
+     * @return The inner projection, or "*".
+     */
+    protected String getFileFieldProjection(final DataStoreParams paramMap) {
+        final String value = paramMap.getAsString(FIELDS, DEFAULT_FILE_FIELDS);
+        if (StringUtil.isBlank(value)) {
+            return DEFAULT_FILE_FIELDS;
+        }
+        return value.trim();
+    }
+
+    /**
+     * Builds the {@code fields} value handed to files.list.
+     * <p>
+     * "*" is passed through so an existing configuration keeps working, an already complete projection
+     * is used verbatim, and a bare field list is wrapped in the files.list envelope so
+     * {@code nextPageToken} and {@code incompleteSearch} are always returned (D-15).
+     * </p>
+     *
+     * @param paramMap The parameters for the data store.
+     * @return The projection for files.list.
+     */
+    protected String buildFileFields(final DataStoreParams paramMap) {
+        final String value = getFileFieldProjection(paramMap);
+        if (WILDCARD_FIELDS.equals(value)) {
+            return WILDCARD_FIELDS;
+        }
+        if (value.contains("files(") || value.contains("nextPageToken")) {
+            return value;
+        }
+        return "nextPageToken,incompleteSearch,files(" + value + ")";
+    }
+
+    /**
      * Creates a new fixed thread pool.
      * @param nThreads The number of threads.
      * @return A new fixed thread pool.
@@ -446,6 +522,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
         final String crawlTarget = (String) configMap.get(CRAWL_TARGET);
+        // A listing the client could not finish must not disappear: the crawl goes on, but the
+        // operator has to find the failure in the log and in the failure URL list.
+        client.setFailureHandler((target, e) -> handleClientFailure(dataConfig, target, e));
         // A file shared with several users shows up once per viewpoint, so index it once.
         final Set<String> crawledFileIds = ConcurrentHashMap.newKeySet();
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
@@ -475,6 +554,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Records a Drive listing failure that the client did not propagate, so that the crawl continues
+     * while the operator still sees which drive or user failed.
+     *
+     * @param dataConfig The data configuration.
+     * @param target The description of the failed listing.
+     * @param e The failure.
+     */
+    protected void handleClientFailure(final DataConfig dataConfig, final String target, final Exception e) {
+        logger.warn("Failed to access {}. Continuing the crawl without it.", target, e);
+        try {
+            ComponentUtil.getComponent(FailureUrlService.class).store(dataConfig, e.getClass().getCanonicalName(), target, e);
+        } catch (final Exception ex) {
+            logger.warn("Failed to record the failure of {}.", target, ex);
+        }
+    }
+
+    /**
      * Walks the files visible to the service account itself, as releases before 15.9 did.
      *
      * @param dataConfig The data configuration.
@@ -493,7 +589,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String query = paramMap.getAsString("query");
         final String corpora = paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES);
         final String spaces = paramMap.getAsString("spaces");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String fields = buildFileFields(paramMap);
         client.getFiles(query, corpora, spaces, fields, file -> submitFile(dataConfig, callback, configMap, paramMap, scriptMap,
                 defaultDataMap, client, executorService, crawledFileIds, file));
     }
@@ -515,7 +611,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
         final String query = paramMap.getAsString("query");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String fields = buildFileFields(paramMap);
         client.getDrives(sharedDrive -> {
             if (!alive) {
                 // The admin UI asked this data store to stop; do not start another listing.
@@ -547,7 +643,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
         final String query = paramMap.getAsString("query");
         final String spaces = paramMap.getAsString("spaces");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String fields = buildFileFields(paramMap);
         for (final String userEmail : client.listUsers(paramMap.getAsString(USER_QUERY))) {
             if (!alive) {
                 // The admin UI asked this data store to stop; do not start another listing.
@@ -990,12 +1086,69 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Chooses the export target for a native Google type.
+     * <p>
+     * Google Forms and Google Sites have no row in {@code exportFormats} at all, so this returns null
+     * for them and the caller indexes the metadata only. Falling through to {@code alt=media} for a
+     * native type always fails, which is what the previous implementation did on every crawl (D-16).
+     * </p>
+     *
+     * @param mimeType The source mime type.
+     * @param exportFormats The live export format map from about.get.
+     * @return The export target mime type, or null when the type cannot be exported.
+     */
+    protected String selectExportMimeType(final String mimeType, final Map<String, List<String>> exportFormats) {
+        if (exportFormats == null) {
+            return null;
+        }
+        final List<String> supported = exportFormats.get(mimeType);
+        if (supported == null || supported.isEmpty()) {
+            return null;
+        }
+        for (final String preferred : PREFERRED_EXPORT_MIMETYPES.getOrDefault(mimeType, List.of())) {
+            if (supported.contains(preferred)) {
+                return preferred;
+            }
+        }
+        return supported.get(0);
+    }
+
+    /**
+     * Flattens the Apps Script JSON bundle into "file name then source" for each script file.
+     * Malformed JSON yields an empty string rather than aborting the file.
+     *
+     * @param json The exported Apps Script bundle.
+     * @return The indexable text.
+     */
+    protected String extractScriptSource(final String json) {
+        final StringBuilder sb = new StringBuilder();
+        try {
+            final Map<String, Object> map = new ObjectMapper().readValue(json, new TypeReference<Map<String, Object>>() {
+            });
+            if (map.containsKey("files")) {
+                @SuppressWarnings("unchecked")
+                final List<Map<String, Object>> files = (List<Map<String, Object>>) map.get("files");
+                files.forEach(f -> {
+                    sb.append(f.getOrDefault("name", StringUtil.EMPTY));
+                    sb.append('\n');
+                    sb.append(f.getOrDefault("source", StringUtil.EMPTY));
+                    sb.append('\n');
+                });
+            }
+        } catch (final Exception e) {
+            logger.warn("Failed to parse an Apps Script bundle.", e);
+        }
+        return sb.toString();
+    }
+
+    /**
      * Returns the contents of a file.
-     * Handles different file types appropriately:
-     * - Google Docs/Presentations: exported as plain text
-     * - Google Sheets: exported as CSV
-     * - Google Apps Script: JSON parsed to extract script source code
-     * - Other files: extracted using Tika extractor
+     * <p>
+     * A native Google type is exported, with the target chosen from the live
+     * {@code exportFormats} map rather than from a hardcoded switch; a type with no target at all,
+     * such as a Form or a Site, yields an empty string and is indexed with its metadata only.
+     * Anything else is downloaded and handed to the Tika extractor.
+     * </p>
      * @param client The GSuiteClient.
      * @param file The file.
      * @param ignoreError Whether to ignore errors.
@@ -1005,45 +1158,25 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         final String mimeType = file.getMimeType();
         final String id = file.getId();
 
-        // Check if this is a Google Apps file (e.g., application/vnd.google-apps.document)
-        final Matcher m = GOOGLE_APPS_MIMETYPE_PATTERN.matcher(mimeType);
-        if (m.matches()) {
-            final String appType = m.group(1); // Extract the app type (e.g., "document", "spreadsheet")
-            switch (appType) {
-            case "document":
-            case "presentation":
-                // Export Google Docs and Presentations as plain text
-                return client.extractFileText(id, "text/plain");
-            case "spreadsheet":
-                // Export Google Sheets as CSV format
-                return client.extractFileText(id, "text/csv");
-            case "script":
-                // Google Apps Script files are exported as JSON
-                // Parse the JSON to extract script file names and source code
-                final String text = client.extractFileText(id, "application/vnd.google-apps.script+json");
-                final StringBuilder sb = new StringBuilder();
-                try {
-                    final Map<String, Object> map = new ObjectMapper().readValue(text, new TypeReference<Map<String, Object>>() {
-                    });
-                    if (map.containsKey("files")) {
-                        @SuppressWarnings("unchecked")
-                        final List<Map<String, Object>> files = (List<Map<String, Object>>) map.get("files");
-                        // Concatenate file names and their source code for indexing
-                        files.forEach(f -> {
-                            sb.append(f.getOrDefault("name", StringUtil.EMPTY));
-                            sb.append("\n");
-                            sb.append(f.getOrDefault("source", StringUtil.EMPTY));
-                            sb.append("\n");
-                        });
-                    }
-                } catch (final Exception e) {
-                    logger.warn("Failed to parse a json content.", e);
+        // Native Google types must be exported; alt=media never works for them. A type that has no
+        // export target at all (Forms, Sites) is not a failure, so it must not be reported as one:
+        // a domain full of Forms would fill the admin failure list on every crawl.
+        if (mimeType != null && mimeType.startsWith(GOOGLE_APPS_MIMETYPE_PREFIX)) {
+            final String exportMimeType = selectExportMimeType(mimeType, client.getExportFormats());
+            if (exportMimeType == null) {
+                if (logger.isDebugEnabled()) {
+                    logger.debug("No export format for {} ({}). Indexing the metadata only.", file.getName(), mimeType);
                 }
-                return sb.toString();
-            default:
-                // Other Google Apps file types (forms, drawings, etc.) are not explicitly handled
-                break;
+                return StringUtil.EMPTY;
             }
+            if (SCRIPT_EXPORT_MIMETYPE.equals(exportMimeType)) {
+                return extractScriptSource(client.extractFileText(id, exportMimeType));
+            }
+            if (exportMimeType.startsWith("image/")) {
+                // Drawings only export as an image; there is no text to index.
+                return StringUtil.EMPTY;
+            }
+            return client.extractFileText(id, exportMimeType);
         }
 
         try (final InputStream in = client.getFileInputStream(id)) {
