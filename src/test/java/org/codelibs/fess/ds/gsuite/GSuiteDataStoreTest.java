@@ -16,6 +16,7 @@
 package org.codelibs.fess.ds.gsuite;
 
 import org.junit.jupiter.api.TestInfo;
+import org.junit.jupiter.api.Test;
 
 import java.util.Date;
 import java.util.List;
@@ -55,61 +56,72 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         super.tearDown(testInfo);
     }
 
+    @Test
     public void testGetName() {
         assertEquals("GoogleDriveDataStore", dataStore.getName());
     }
 
+    @Test
     public void testIsIgnoreFolder_True() {
         final DataStoreParams params = new DataStoreParams();
         params.put("ignore_folder", "true");
         assertTrue(dataStore.isIgnoreFolder(params));
     }
 
+    @Test
     public void testIsIgnoreFolder_False() {
         final DataStoreParams params = new DataStoreParams();
         params.put("ignore_folder", "false");
         assertFalse(dataStore.isIgnoreFolder(params));
     }
 
+    @Test
     public void testIsIgnoreFolder_Default() {
         final DataStoreParams params = new DataStoreParams();
         assertTrue(dataStore.isIgnoreFolder(params));
     }
 
+    @Test
     public void testIsIgnoreError_True() {
         final DataStoreParams params = new DataStoreParams();
         params.put("ignore_error", "true");
         assertTrue(dataStore.isIgnoreError(params));
     }
 
+    @Test
     public void testIsIgnoreError_False() {
         final DataStoreParams params = new DataStoreParams();
         params.put("ignore_error", "false");
         assertFalse(dataStore.isIgnoreError(params));
     }
 
+    @Test
     public void testIsIgnoreError_Default() {
         final DataStoreParams params = new DataStoreParams();
         assertTrue(dataStore.isIgnoreError(params));
     }
 
+    @Test
     public void testGetMaxSize_WithValidValue() {
         final DataStoreParams params = new DataStoreParams();
         params.put("max_size", "5000000");
         assertEquals(5000000L, dataStore.getMaxSize(params));
     }
 
+    @Test
     public void testGetMaxSize_WithInvalidValue() {
         final DataStoreParams params = new DataStoreParams();
         params.put("max_size", "invalid");
         assertEquals(10000000L, dataStore.getMaxSize(params));
     }
 
+    @Test
     public void testGetMaxSize_Default() {
         final DataStoreParams params = new DataStoreParams();
         assertEquals(10000000L, dataStore.getMaxSize(params));
     }
 
+    @Test
     public void testGetSupportedMimeTypes_Default() {
         final DataStoreParams params = new DataStoreParams();
         final String[] mimeTypes = dataStore.getSupportedMimeTypes(params);
@@ -118,6 +130,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals(".*", mimeTypes[0]);
     }
 
+    @Test
     public void testGetSupportedMimeTypes_Custom() {
         final DataStoreParams params = new DataStoreParams();
         params.put("supported_mimetypes", "application/pdf, text/plain, image/.*");
@@ -129,12 +142,14 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals("image/.*", mimeTypes[2]);
     }
 
+    @Test
     public void testNewFixedThreadPool() {
         final ExecutorService executor = dataStore.newFixedThreadPool(4);
         assertNotNull(executor);
         executor.shutdown();
     }
 
+    @Test
     public void testToDate_WithValidDateTime() {
         final long timestamp = System.currentTimeMillis();
         final DateTime dateTime = new DateTime(timestamp);
@@ -143,21 +158,25 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals(timestamp, result.getTime());
     }
 
+    @Test
     public void testToDate_WithNull() {
         final Date result = dataStore.toDate(null);
         assertNull(result);
     }
 
+    @Test
     public void testGetPermission_NullValue() {
         final String result = dataStore.getPermission("user", null);
         assertNull(result);
     }
 
+    @Test
     public void testGetPermission_UnknownType() {
         final String result = dataStore.getPermission("unknown", "value");
         assertNull(result);
     }
 
+    @Test
     public void testGetPermission_WithDeletedPermission() {
         final Permission permission = new Permission();
         permission.setType("user");
@@ -167,6 +186,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertNull(result);
     }
 
+    @Test
     public void testGetUrl_WithWebContentLink() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
@@ -176,6 +196,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals("https://drive.google.com/file/d/abc123/view", url);
     }
 
+    @Test
     public void testGetUrl_WithoutWebContentLink() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
@@ -184,6 +205,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals("https://drive.google.com/uc?id=abc123&export=download", url);
     }
 
+    @Test
     public void testGetUrl_WithoutWebContentLinkAndId() {
         final DataStoreParams params = new DataStoreParams();
         final File file = new File();
@@ -191,6 +213,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertNull(url);
     }
 
+    @Test
     public void testGetFilePermissions_WithNullPermissionsAndOwners() {
         final File file = new File();
         final List<String> permissions = dataStore.getFilePermissions(null, file);
@@ -198,19 +221,23 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals(0, permissions.size());
     }
 
+    @Test
     public void testSetExtractorName() {
         dataStore.setExtractorName("customExtractor");
         assertEquals("customExtractor", dataStore.extractorName);
     }
 
+    @Test
     public void testDefaultExtractorName() {
         assertEquals("tikaExtractor", dataStore.extractorName);
     }
 
+    @Test
     public void testDefaultMaxCachedContentSize() {
         assertEquals(10000000L, GoogleDriveDataStore.DEFAULT_MAX_SIZE);
     }
 
+    @Test
     public void testAllConstants() {
         assertEquals("max_size", GoogleDriveDataStore.MAX_SIZE);
         assertEquals("ignore_folder", GoogleDriveDataStore.IGNORE_FOLDER);
@@ -223,6 +250,7 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals("number_of_threads", GoogleDriveDataStore.NUMBER_OF_THREADS);
     }
 
+    @Test
     public void testFileScriptConstants() {
         assertEquals("file", GoogleDriveDataStore.FILE);
         assertEquals("name", GoogleDriveDataStore.FILE_NAME);
@@ -240,10 +268,12 @@ public class GSuiteDataStoreTest extends UnitDsTestCase {
         assertEquals("roles", GoogleDriveDataStore.FILE_ROLES);
     }
 
+    @Test
     public void testDefaultThreadPoolTimeoutSeconds() {
         assertEquals(60L, GoogleDriveDataStore.DEFAULT_THREAD_POOL_TIMEOUT_SECONDS);
     }
 
+    @Test
     public void testGoogleAppsMimeTypePattern() {
         assertNotNull(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN);
         assertTrue(GoogleDriveDataStore.GOOGLE_APPS_MIMETYPE_PATTERN.matcher("application/vnd.google-apps.document").matches());

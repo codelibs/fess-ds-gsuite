@@ -8,10 +8,10 @@ on:
     branches:
     - master
     - "*.x"
+  # No branch filter: the pull_request trigger matches on the BASE branch, so restricting it to
+  # master/*.x means a stacked pull request (one that targets another feature branch) never runs
+  # CI at all. Running on every pull request regardless of base keeps stacked work verified.
   pull_request:
-    branches:
-    - master
-    - "*.x"
 
 jobs:
   build:
