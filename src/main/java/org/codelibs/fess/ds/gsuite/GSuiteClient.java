@@ -31,6 +31,7 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
@@ -46,13 +47,19 @@ import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreException;
 
 import com.google.api.client.googleapis.GoogleUtils;
+import com.google.api.client.http.GenericUrl;
+import com.google.api.client.http.HttpRequestFactory;
 import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.HttpResponse;
 import com.google.api.client.http.HttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.http.javanet.NetHttpTransport.Builder;
+import com.google.api.client.json.GenericJson;
+import com.google.api.client.json.JsonObjectParser;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.client.util.SecurityUtils;
 import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.model.DriveList;
 import com.google.api.services.drive.model.File;
 import com.google.api.services.drive.model.FileList;
 import com.google.api.services.drive.model.Permission;
@@ -92,9 +99,17 @@ public class GSuiteClient implements AutoCloseable {
     protected static final String IMPERSONATE_USER = "impersonate_user";
     /** Default OAuth scopes. Read-only, unlike the previous hardcoded read-write scope. */
     protected static final String DEFAULT_SCOPES = "https://www.googleapis.com/auth/drive.readonly";
+    /** The Admin SDK scope that {@code admin/directory/v1/users} requires. Not part of {@link #DEFAULT_SCOPES}. */
+    protected static final String ADMIN_DIRECTORY_USER_READONLY_SCOPE = "https://www.googleapis.com/auth/admin.directory.user.readonly";
 
     /** Constant for all drives. */
     public static final String ALL_DRIVES = "allDrives";
+
+    /** Corpora value that scopes files.list to a single shared drive. */
+    public static final String DRIVE_CORPORA = "drive";
+
+    /** Corpora value that scopes files.list to the files of the requesting user, i.e. their My Drive. */
+    public static final String USER_CORPORA = "user";
 
     /** Default maximum cached content size in bytes (1MB). */
     protected static final int DEFAULT_MAX_CACHED_CONTENT_SIZE = 1024 * 1024;
@@ -120,6 +135,24 @@ public class GSuiteClient implements AutoCloseable {
     /** The field projection used by permissions.list. */
     protected static final String PERMISSION_FIELDS =
             "nextPageToken,permissions(id,type,role,emailAddress,domain,deleted,allowFileDiscovery,permissionDetails)";
+
+    /** The maximum page size accepted by drives.list. The API caps this at 100, unlike files.list. */
+    protected static final int DRIVE_PAGE_SIZE_LIMIT = 100;
+
+    /** The field projection used by drives.list. */
+    protected static final String DRIVE_FIELDS = "nextPageToken,drives(id,name)";
+
+    /** The Admin SDK Directory endpoint that lists users. */
+    protected static final String ADMIN_DIRECTORY_USERS_URL = "https://admin.googleapis.com/admin/directory/v1/users";
+
+    /** The customer alias that resolves to the account of the impersonated administrator. */
+    protected static final String ADMIN_CUSTOMER = "my_customer";
+
+    /** The maximum page size accepted by Admin SDK users.list. The API caps this at 500. */
+    protected static final int ADMIN_MAX_RESULTS = 500;
+
+    /** The field projection used by Admin SDK users.list. */
+    protected static final String ADMIN_USER_FIELDS = "nextPageToken,users(primaryEmail)";
 
     /** The Google Drive client. */
     protected Drive drive;
@@ -204,15 +237,29 @@ public class GSuiteClient implements AutoCloseable {
     }
 
     /**
-     * Returns the OAuth scopes.
+     * Returns the OAuth scopes of this client.
+     *
+     * @return The OAuth scopes.
+     * @see #resolveScopes(DataStoreParams)
+     */
+    protected Collection<String> getScopes() {
+        return resolveScopes(params);
+    }
+
+    /**
+     * Resolves the OAuth scopes carried by the given parameters.
      * A blank (absent, empty, or whitespace-only) {@link #SCOPES} parameter falls back to
      * {@link #DEFAULT_SCOPES}. If the parameter is present and non-blank but, after splitting on
      * commas, trimming, and dropping blank entries, yields no usable scope (e.g. {@code ","}),
      * a {@link DataStoreException} is thrown instead of silently returning an empty collection.
+     * <p>
+     * This is the single resolution a caller must validate against before assuming a scope is
+     * granted, since the raw parameter value is neither trimmed nor split.
      *
+     * @param params The data store parameters.
      * @return The OAuth scopes.
      */
-    protected Collection<String> getScopes() {
+    protected static Collection<String> resolveScopes(final DataStoreParams params) {
         final String rawScopes = params.getAsString(SCOPES);
         final String scopesValue = StringUtil.isBlank(rawScopes) ? DEFAULT_SCOPES : rawScopes;
         final Collection<String> scopes =
@@ -407,6 +454,197 @@ public class GSuiteClient implements AutoCloseable {
             throw new DataStoreException("Failed to access permissions of " + fileId + ".", e);
         }
         return permissionList;
+    }
+
+    /**
+     * Enumerates every shared drive of the domain, following pagination.
+     * <p>
+     * Requires the caller to be impersonating a Google Workspace domain administrator: the request
+     * sets {@code useDomainAdminAccess=true}, which returns every shared drive of the domain the
+     * requester administers, whether or not the requester is a member of it.
+     *
+     * @param consumer A consumer for each shared drive.
+     */
+    public void getDrives(final Consumer<com.google.api.services.drive.model.Drive> consumer) {
+        String pageToken = null;
+        try {
+            do {
+                final Drive.Drives.List list = getDrive().drives()
+                        .list()
+                        .setUseDomainAdminAccess(Boolean.TRUE)
+                        .setPageSize(Integer.valueOf(DRIVE_PAGE_SIZE_LIMIT))
+                        .setFields(DRIVE_FIELDS)
+                        .setPageToken(pageToken);
+                final DriveList result = list.execute();
+                if (result.getDrives() != null) {
+                    for (final com.google.api.services.drive.model.Drive sharedDrive : result.getDrives()) {
+                        consumer.accept(sharedDrive);
+                    }
+                }
+                pageToken = result.getNextPageToken();
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to access shared drives.", e);
+        }
+    }
+
+    /**
+     * Walks every file of one shared drive, following pagination.
+     * <p>
+     * Unlike {@link #getFiles(String, String, String, String, Consumer)} with
+     * {@link #ALL_DRIVES}, this scopes the listing to a single {@code driveId}, so a crawl can walk
+     * the drives of a domain one at a time.
+     *
+     * @param driveId The shared drive ID.
+     * @param q The query to filter files, or null.
+     * @param fields The field projection, or null.
+     * @param consumer A consumer for each file.
+     */
+    public void getFilesInDrive(final String driveId, final String q, final String fields, final Consumer<File> consumer) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("driveId: {}, query: {}, fields: {}", driveId, q, fields);
+        }
+        String pageToken = null;
+        try {
+            do {
+                final Drive.Files.List list = getDrive().files()
+                        .list()
+                        .setCorpora(DRIVE_CORPORA)
+                        .setDriveId(driveId)
+                        .setIncludeItemsFromAllDrives(Boolean.TRUE)
+                        .setSupportsAllDrives(Boolean.TRUE)
+                        .setPageToken(pageToken);
+                if (StringUtil.isNotBlank(q)) {
+                    list.setQ(q);
+                }
+                if (StringUtil.isNotBlank(fields)) {
+                    list.setFields(fields);
+                }
+                final FileList result = list.execute();
+                if (result.getFiles() != null) {
+                    for (final File file : result.getFiles()) {
+                        consumer.accept(file);
+                    }
+                }
+                pageToken = result.getNextPageToken();
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to access files in a shared drive: " + driveId, e);
+        }
+    }
+
+    /**
+     * Lists the primary email address of every user of the domain through the Admin SDK Directory API.
+     * <p>
+     * Implemented as a plain REST call so that {@code google-api-services-admin-directory} does not
+     * have to become a dependency: {@code users.list} is a single GET. The response is parsed with
+     * the same {@link GsonFactory} the Drive service already uses, so no second JSON stack is pulled in.
+     * <p>
+     * The caller must be impersonating an administrator and the credentials must carry
+     * {@link #ADMIN_DIRECTORY_USER_READONLY_SCOPE}, which is not part of {@link #DEFAULT_SCOPES}.
+     *
+     * @param userQuery The Admin SDK {@code query} used to narrow the users down, or null.
+     * @return The primary email addresses. Never null, but possibly empty.
+     */
+    public List<String> listUsers(final String userQuery) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("userQuery: {}", userQuery);
+        }
+        final List<String> userList = new ArrayList<>();
+        final HttpRequestFactory requestFactory = createAdminRequestFactory();
+        final JsonObjectParser parser = new JsonObjectParser(GsonFactory.getDefaultInstance());
+        String pageToken = null;
+        try {
+            do {
+                final GenericUrl url = new GenericUrl(ADMIN_DIRECTORY_USERS_URL);
+                url.put("customer", ADMIN_CUSTOMER);
+                url.put("maxResults", Integer.toString(ADMIN_MAX_RESULTS));
+                url.put("projection", "basic");
+                url.put("fields", ADMIN_USER_FIELDS);
+                if (StringUtil.isNotBlank(userQuery)) {
+                    url.put("query", userQuery);
+                }
+                if (pageToken != null) {
+                    url.put("pageToken", pageToken);
+                }
+                final HttpResponse response = requestFactory.buildGetRequest(url).setParser(parser).execute();
+                try {
+                    final GenericJson json = response.parseAs(GenericJson.class);
+                    pageToken = json == null ? null : collectUserEmails(json, userList);
+                } finally {
+                    response.disconnect();
+                }
+            } while (pageToken != null);
+        } catch (final IOException e) {
+            throw new DataStoreException("Failed to list users of the domain.", e);
+        }
+        if (logger.isDebugEnabled()) {
+            logger.debug("users: {}", userList.size());
+        }
+        return userList;
+    }
+
+    /**
+     * Appends the primary email address of every user of one {@code users.list} page to the given list.
+     * <p>
+     * The page is parsed untyped, so a user without {@code primaryEmail} is skipped rather than
+     * added as a null entry.
+     *
+     * @param json One page of the {@code users.list} response.
+     * @param userList The list to append the email addresses to.
+     * @return The token of the next page, or null if this was the last page.
+     */
+    protected static String collectUserEmails(final GenericJson json, final List<String> userList) {
+        if (json.get("users") instanceof final List<?> users) {
+            for (final Object user : users) {
+                if (user instanceof final Map<?, ?> userMap) {
+                    final Object email = userMap.get("primaryEmail");
+                    if (email != null) {
+                        userList.add(email.toString());
+                    }
+                }
+            }
+        }
+        final Object nextPageToken = json.get("nextPageToken");
+        return nextPageToken != null ? nextPageToken.toString() : null;
+    }
+
+    /**
+     * Creates the request factory used for Admin SDK calls.
+     * <p>
+     * Reuses {@link #requestInitializer}, so an Admin SDK request carries the same credentials and
+     * the same read and connect timeouts as a Drive request. Exists as an override point for tests.
+     *
+     * @return The request factory.
+     */
+    protected HttpRequestFactory createAdminRequestFactory() {
+        return httpTransport.createRequestFactory(requestInitializer);
+    }
+
+    /**
+     * Returns a client that acts as another user through domain-wide delegation.
+     * <p>
+     * The returned client re-runs the ordinary construction path on a copy of this client's
+     * parameters with {@link #IMPERSONATE_USER} overridden, so it gets its own credentials, its own
+     * request initializer and its own Drive service, all bound to {@code userEmail}. Nothing that
+     * binds a request to a particular user is shared, so several per-user clients can be alive at
+     * once without interfering. This client is left untouched, including its own impersonation.
+     * <p>
+     * Only {@link #httpTransport} is shared, as a connection factory carrying no per-user state. The
+     * returned client therefore does not own the transport and must not outlive this client.
+     *
+     * @param userEmail The email address of the user to act as.
+     * @return A client bound to that user.
+     */
+    public GSuiteClient forUser(final String userEmail) {
+        if (logger.isDebugEnabled()) {
+            logger.debug("Creating a client for {}", userEmail);
+        }
+        final DataStoreParams userParams = params.newInstance();
+        userParams.put(IMPERSONATE_USER, userEmail);
+        final GSuiteClient client = new GSuiteClient(userParams, httpTransport);
+        client.setApplicationName(applicationName);
+        return client;
     }
 
     /**

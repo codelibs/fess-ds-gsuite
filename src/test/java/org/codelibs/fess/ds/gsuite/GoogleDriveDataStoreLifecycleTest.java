@@ -93,6 +93,16 @@ public class GoogleDriveDataStoreLifecycleTest extends UnitDsTestCase {
         return params;
     }
 
+    /**
+     * A config map selecting the legacy route, the only one StubGSuiteClient backs: it stubs
+     * getFiles alone, which is what crawlLegacy calls.
+     */
+    private Map<String, Object> newLegacyConfigMap() {
+        final Map<String, Object> configMap = new HashMap<>();
+        configMap.put(GoogleDriveDataStore.CRAWL_TARGET, GoogleDriveDataStore.TARGET_LEGACY);
+        return configMap;
+    }
+
     /** A callback that does nothing. */
     private IndexUpdateCallback newCallback() {
         return new IndexUpdateCallback() {
@@ -212,7 +222,7 @@ public class GoogleDriveDataStoreLifecycleTest extends UnitDsTestCase {
 
         final DataStoreParams params = newCredentialParams();
         try (GSuiteClient client = new StubGSuiteClient(params, new MockHttpTransport(), Arrays.asList(newFile("f1"), newFile("f2")))) {
-            dataStore.storeFiles(null, newCallback(), new HashMap<>(), params, new HashMap<>(), new HashMap<>(), client);
+            dataStore.storeFiles(null, newCallback(), newLegacyConfigMap(), params, new HashMap<>(), new HashMap<>(), client);
         }
 
         assertEquals(0, processed.size());
@@ -233,7 +243,7 @@ public class GoogleDriveDataStoreLifecycleTest extends UnitDsTestCase {
 
         final DataStoreParams params = newCredentialParams();
         try (GSuiteClient client = new StubGSuiteClient(params, new MockHttpTransport(), Arrays.asList(newFile("f1"), newFile("f2")))) {
-            dataStore.storeFiles(null, newCallback(), new HashMap<>(), params, new HashMap<>(), new HashMap<>(), client);
+            dataStore.storeFiles(null, newCallback(), newLegacyConfigMap(), params, new HashMap<>(), new HashMap<>(), client);
         }
 
         assertEquals(2, processed.size());

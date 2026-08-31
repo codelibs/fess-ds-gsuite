@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -46,6 +47,7 @@ import org.codelibs.fess.ds.AbstractDataStore;
 import org.codelibs.fess.ds.callback.IndexUpdateCallback;
 import org.codelibs.fess.entity.DataStoreParams;
 import org.codelibs.fess.exception.DataStoreCrawlingException;
+import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
@@ -117,6 +119,22 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * crawl may run several clients.
      */
     protected static final String PERMISSION_RESOLVERS = "permission_resolvers";
+
+    /** Parameter key for the crawl target. */
+    protected static final String CRAWL_TARGET = "crawl_target";
+    /** Parameter key for the administrator account to impersonate. */
+    protected static final String IMPERSONATE_USER = "impersonate_user";
+    /** Parameter key for the Admin SDK user query. */
+    protected static final String USER_QUERY = "user_query";
+
+    /** Crawl target that keeps the pre-15.9 behaviour of the service account's own view. */
+    protected static final String TARGET_LEGACY = "legacy";
+    /** Crawl target that walks every shared drive of the domain. */
+    protected static final String TARGET_SHARED_DRIVES = "shared_drives";
+    /** Crawl target that walks the My Drive of every directory user. */
+    protected static final String TARGET_USERS = "users";
+    /** Crawl target that walks both shared drives and every user's My Drive. */
+    protected static final String TARGET_BOTH = "both";
 
     /**
      * Parameter keys that carry service account credentials and must never reach the script
@@ -259,6 +277,7 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap) {
 
         final Map<String, Object> configMap = new HashMap<>();
+        configMap.put(CRAWL_TARGET, getCrawlTarget(paramMap));
         configMap.put(MAX_SIZE, getMaxSize(paramMap));
         configMap.put(IGNORE_FOLDER, isIgnoreFolder(paramMap));
         configMap.put(IGNORE_ERROR, isIgnoreError(paramMap));
@@ -362,6 +381,44 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
+     * Returns the validated crawl target.
+     * <p>
+     * Every target other than {@code legacy} relies on {@code useDomainAdminAccess}, which the Drive
+     * API only grants to a Google Workspace domain administrator. A service account is not one by
+     * itself: it has to impersonate an administrator through domain-wide delegation. A missing
+     * {@code impersonate_user} therefore fails the crawl at startup rather than silently indexing
+     * zero files.
+     * <p>
+     * {@code users} and {@code both} additionally enumerate the directory through
+     * {@code admin/directory/v1/users}, which needs
+     * {@link GSuiteClient#ADMIN_DIRECTORY_USER_READONLY_SCOPE}. That scope is not part of
+     * {@link GSuiteClient#DEFAULT_SCOPES}, so without it the combination can only fail with an
+     * opaque 403 once the crawl has already begun. It is rejected here instead.
+     *
+     * @param paramMap The parameters for the data store.
+     * @return One of {@code legacy}, {@code shared_drives}, {@code users} or {@code both}.
+     */
+    protected String getCrawlTarget(final DataStoreParams paramMap) {
+        final String crawlTarget = paramMap.getAsString(CRAWL_TARGET, TARGET_SHARED_DRIVES).trim();
+        if (!TARGET_LEGACY.equals(crawlTarget) && !TARGET_SHARED_DRIVES.equals(crawlTarget) && !TARGET_USERS.equals(crawlTarget)
+                && !TARGET_BOTH.equals(crawlTarget)) {
+            throw new DataStoreException("parameter '" + CRAWL_TARGET + "' must be one of '" + TARGET_LEGACY + "', '" + TARGET_SHARED_DRIVES
+                    + "', '" + TARGET_USERS + "' or '" + TARGET_BOTH + "': " + crawlTarget);
+        }
+        if (!TARGET_LEGACY.equals(crawlTarget) && StringUtil.isBlank(paramMap.getAsString(IMPERSONATE_USER))) {
+            throw new DataStoreException(
+                    "parameter '" + IMPERSONATE_USER + "' is required when '" + CRAWL_TARGET + "' is not '" + TARGET_LEGACY + "'.");
+        }
+        if ((TARGET_USERS.equals(crawlTarget) || TARGET_BOTH.equals(crawlTarget))
+                && !GSuiteClient.resolveScopes(paramMap).contains(GSuiteClient.ADMIN_DIRECTORY_USER_READONLY_SCOPE)) {
+            throw new DataStoreException(
+                    "parameter '" + GSuiteClient.SCOPES + "' must include '" + GSuiteClient.ADMIN_DIRECTORY_USER_READONLY_SCOPE + "' when '"
+                            + CRAWL_TARGET + "' is '" + TARGET_USERS + "' or '" + TARGET_BOTH + "'.");
+        }
+        return crawlTarget;
+    }
+
+    /**
      * Creates a new fixed thread pool.
      * @param nThreads The number of threads.
      * @return A new fixed thread pool.
@@ -375,7 +432,8 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     }
 
     /**
-     * Stores the files.
+     * Stores the files, choosing the traversal route from {@link #CRAWL_TARGET}.
+     *
      * @param dataConfig The data configuration.
      * @param callback The callback to index the files.
      * @param configMap The configuration map.
@@ -387,24 +445,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     protected void storeFiles(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
             final GSuiteClient client) {
-        final String query = paramMap.getAsString("query");
-        final String corpora = paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES);
-        final String spaces = paramMap.getAsString("spaces");
-        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        final String crawlTarget = (String) configMap.get(CRAWL_TARGET);
+        // A file shared with several users shows up once per viewpoint, so index it once.
+        final Set<String> crawledFileIds = ConcurrentHashMap.newKeySet();
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
         try {
-            client.getFiles(query, corpora, spaces, fields, file -> {
-                if (!alive) {
-                    // The admin UI asked this data store to stop; do not queue any more work.
-                    if (logger.isDebugEnabled()) {
-                        logger.debug("Crawling is stopped. Skipping {}.", file.getId());
-                    }
-                    return;
+            if (TARGET_LEGACY.equals(crawlTarget)) {
+                crawlLegacy(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService, crawledFileIds);
+            } else {
+                if (TARGET_SHARED_DRIVES.equals(crawlTarget) || TARGET_BOTH.equals(crawlTarget)) {
+                    crawlSharedDrives(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService,
+                            crawledFileIds);
                 }
-                executorService
-                        .execute(() -> processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file));
-
-            });
+                if (TARGET_USERS.equals(crawlTarget) || TARGET_BOTH.equals(crawlTarget)) {
+                    crawlUsers(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService,
+                            crawledFileIds);
+                }
+            }
             if (logger.isDebugEnabled()) {
                 logger.debug("Shutting down thread executor.");
             }
@@ -415,6 +472,134 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         } finally {
             executorService.shutdownNow();
         }
+    }
+
+    /**
+     * Walks the files visible to the service account itself, as releases before 15.9 did.
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the files.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The GSuiteClient.
+     * @param executorService The executor that runs the per-file work.
+     * @param crawledFileIds The file IDs already submitted.
+     */
+    protected void crawlLegacy(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
+        final String query = paramMap.getAsString("query");
+        final String corpora = paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES);
+        final String spaces = paramMap.getAsString("spaces");
+        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        client.getFiles(query, corpora, spaces, fields, file -> submitFile(dataConfig, callback, configMap, paramMap, scriptMap,
+                defaultDataMap, client, executorService, crawledFileIds, file));
+    }
+
+    /**
+     * Walks every shared drive of the domain, one {@code corpora=drive} listing per drive.
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the files.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The GSuiteClient.
+     * @param executorService The executor that runs the per-file work.
+     * @param crawledFileIds The file IDs already submitted.
+     */
+    protected void crawlSharedDrives(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
+        final String query = paramMap.getAsString("query");
+        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        client.getDrives(sharedDrive -> {
+            if (!alive) {
+                // The admin UI asked this data store to stop; do not start another listing.
+                return;
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Crawling a shared drive: {} ({})", sharedDrive.getName(), sharedDrive.getId());
+            }
+            client.getFilesInDrive(sharedDrive.getId(), query, fields, file -> submitFile(dataConfig, callback, configMap, paramMap,
+                    scriptMap, defaultDataMap, client, executorService, crawledFileIds, file));
+        });
+    }
+
+    /**
+     * Walks the My Drive of every directory user by impersonating each of them in turn.
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the files.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The GSuiteClient.
+     * @param executorService The executor that runs the per-file work.
+     * @param crawledFileIds The file IDs already submitted.
+     */
+    protected void crawlUsers(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
+        final String query = paramMap.getAsString("query");
+        final String spaces = paramMap.getAsString("spaces");
+        final String fields = paramMap.getAsString("fields", FILE_FIELDS);
+        for (final String userEmail : client.listUsers(paramMap.getAsString(USER_QUERY))) {
+            if (!alive) {
+                // The admin UI asked this data store to stop; do not start another listing.
+                return;
+            }
+            if (logger.isDebugEnabled()) {
+                logger.debug("Crawling the My Drive of {}", userEmail);
+            }
+            // Not closed on purpose: the per-user client borrows the transport of the primary
+            // client, which storeData closes, and owns nothing else that has to be released.
+            final GSuiteClient userClient = client.forUser(userEmail);
+            userClient.getFiles(query, GSuiteClient.USER_CORPORA, spaces, fields, file -> submitFile(dataConfig, callback, configMap,
+                    paramMap, scriptMap, defaultDataMap, userClient, executorService, crawledFileIds, file));
+        }
+    }
+
+    /**
+     * Submits one file for processing unless the crawl was stopped or the file was already seen.
+     * <p>
+     * The de-duplication is the single atomic {@link Set#add(Object)} on a concurrent set: a
+     * {@code contains} followed by an {@code add} would let two listing threads submit the same
+     * file, and the same document would then be indexed twice.
+     * </p>
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the file.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The client that produced the file.
+     * @param executorService The executor that runs the per-file work.
+     * @param crawledFileIds The file IDs already submitted.
+     * @param file The file.
+     */
+    protected void submitFile(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
+            final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds, final File file) {
+        if (!alive) {
+            // The admin UI asked this data store to stop; do not queue any more work.
+            if (logger.isDebugEnabled()) {
+                logger.debug("Crawling is stopped. Skipping {}.", file.getId());
+            }
+            return;
+        }
+        final String fileId = file.getId();
+        if (StringUtil.isNotBlank(fileId) && !crawledFileIds.add(fileId)) {
+            if (logger.isDebugEnabled()) {
+                logger.debug("Skipped a duplicated file: {}", fileId);
+            }
+            return;
+        }
+        executorService.execute(() -> processFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, file));
     }
 
     /**
