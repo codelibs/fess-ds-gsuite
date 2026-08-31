@@ -16,9 +16,13 @@
 package org.codelibs.fess.ds.gsuite;
 
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +32,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import org.apache.logging.log4j.LogManager;
@@ -50,11 +55,15 @@ import org.codelibs.fess.helper.CrawlerStatsHelper;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsAction;
 import org.codelibs.fess.helper.CrawlerStatsHelper.StatsKeyObject;
 import org.codelibs.fess.helper.PermissionHelper;
+import org.codelibs.fess.mylasta.direction.FessConfig;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
+import org.opensearch.index.query.QueryBuilder;
+import org.opensearch.index.query.QueryBuilders;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.api.services.drive.model.Change;
 import com.google.api.services.drive.model.File;
 
 /**
@@ -132,6 +141,15 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * crawl may run several clients.
      */
     protected static final String PERMISSION_RESOLVERS = "permission_resolvers";
+
+    /** Parameter key that enables incremental crawling. */
+    protected static final String INCREMENTAL = "incremental";
+
+    /**
+     * The parameter {@code DataIndexHelper} reads to skip its stale document sweep. Its own constant
+     * is private, so the key is spelled out here.
+     */
+    protected static final String DELETE_OLD_DOCS = "delete_old_docs";
 
     /** Parameter key for the crawl target. */
     protected static final String CRAWL_TARGET = "crawl_target";
@@ -309,6 +327,79 @@ public class GoogleDriveDataStore extends AbstractDataStore {
     @Override
     protected String getName() {
         return this.getClass().getSimpleName();
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * The incremental option has to be applied here rather than in {@link #storeData}:
+     * {@code AbstractDataStore#store} hands {@code storeData} a copy of the parameter map, while
+     * {@code DataIndexHelper} reads back the very {@code initParamMap} object it passed to this
+     * method.
+     * </p>
+     * <p>
+     * The suppression is written twice on purpose. {@code AbstractDataStore#store} merges the handler
+     * parameters into {@code initParamMap}, so an explicit {@code delete_old_docs=true} would
+     * otherwise overwrite the first write; and {@code DataIndexHelper} sweeps in a {@code finally}
+     * block, so the second write has to happen even when the crawl failed.
+     * </p>
+     */
+    @Override
+    public void store(final DataConfig config, final IndexUpdateCallback callback, final DataStoreParams initParamMap) {
+        if (!isIncrementalConfig(config)) {
+            super.store(config, callback, initParamMap);
+            return;
+        }
+        logger.info("Incremental crawling is enabled: the stale document sweep is disabled for this run.");
+        disableDeleteOldDocsIfIncremental(config, initParamMap);
+        try {
+            super.store(config, callback, initParamMap);
+        } finally {
+            disableDeleteOldDocsIfIncremental(config, initParamMap);
+        }
+    }
+
+    /**
+     * Returns whether the data configuration asks for an incremental crawl.
+     *
+     * @param config The data configuration, possibly null.
+     * @return true when incremental crawling is enabled.
+     */
+    protected boolean isIncrementalConfig(final DataConfig config) {
+        if (config == null) {
+            return false;
+        }
+        return Constants.TRUE.equalsIgnoreCase(config.getHandlerParameterMap().get(INCREMENTAL));
+    }
+
+    /**
+     * Switches off the stale document sweep of {@code DataIndexHelper} when the crawl is incremental.
+     * <p>
+     * {@code DataIndexHelper#deleteOldDocs()} deletes every document of the configuration whose
+     * segment differs from the current session id, which assumes a full crawl. An incremental run
+     * only touches the documents that changed, so the sweep would delete the rest of the index.
+     * </p>
+     * <p>
+     * An explicit {@code delete_old_docs=true} is overridden rather than honoured: combined with
+     * {@code incremental=true} it is not a preference but a data loss, and the supported way to drop
+     * documents that vanished from Drive is a separate {@code incremental=false} configuration whose
+     * full crawl sweeps them. The override is logged so it is visible in the crawler log.
+     * </p>
+     *
+     * @param config The data configuration, possibly null.
+     * @param initParamMap The parameter map {@code DataIndexHelper} reads back.
+     */
+    protected void disableDeleteOldDocsIfIncremental(final DataConfig config, final DataStoreParams initParamMap) {
+        if (!isIncrementalConfig(config)) {
+            return;
+        }
+        final String configured = initParamMap.getAsString(DELETE_OLD_DOCS);
+        if (StringUtil.isNotBlank(configured) && !Constants.FALSE.equalsIgnoreCase(configured)) {
+            logger.warn("'{}={}' is ignored because '{}' is enabled: an incremental run only sees changed documents, so the stale "
+                    + "document sweep would delete every document it did not touch. Schedule a separate '{}=false' configuration to "
+                    + "drop the documents that vanished from Drive.", DELETE_OLD_DOCS, configured, INCREMENTAL, INCREMENTAL);
+        }
+        initParamMap.put(DELETE_OLD_DOCS, Constants.FALSE);
     }
 
     @Override
@@ -509,6 +600,17 @@ public class GoogleDriveDataStore extends AbstractDataStore {
 
     /**
      * Stores the files, choosing the traversal route from {@link #CRAWL_TARGET}.
+     * <p>
+     * When the configuration is incremental every scope is walked through its own change feed
+     * instead of a full listing, and the start page tokens are persisted once the executor has
+     * drained. They are <em>not</em> persisted when the crawl was stopped or the executor did not
+     * drain in time: an advanced token would silently skip the changes whose files never reached the
+     * index.
+     * </p>
+     * <p>
+     * The tokens are checked against {@link #buildCrawlSignature} before anything is crawled, so a
+     * configuration change discards them and the run degrades to a full crawl of every scope.
+     * </p>
      *
      * @param dataConfig The data configuration.
      * @param callback The callback to index the files.
@@ -525,32 +627,135 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         // A listing the client could not finish must not disappear: the crawl goes on, but the
         // operator has to find the failure in the log and in the failure URL list.
         client.setFailureHandler((target, e) -> handleClientFailure(dataConfig, target, e));
+        // changes.list nests the file under changes(file(...)), so it needs the inner projection.
+        client.setFileFields(getFileFieldProjection(paramMap));
+        final DriveCrawlState state = isIncrementalConfig(dataConfig) ? newCrawlState(dataConfig) : null;
+        // A stored token is only meaningful for the configuration it was taken in.
+        applyCrawlSignature(state, paramMap);
         // A file shared with several users shows up once per viewpoint, so index it once.
         final Set<String> crawledFileIds = ConcurrentHashMap.newKeySet();
         final ExecutorService executorService = newFixedThreadPool(Integer.parseInt(paramMap.getAsString(NUMBER_OF_THREADS, "1")));
         try {
             if (TARGET_LEGACY.equals(crawlTarget)) {
-                crawlLegacy(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService, crawledFileIds);
+                crawlLegacy(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService, crawledFileIds,
+                        state);
             } else {
                 if (TARGET_SHARED_DRIVES.equals(crawlTarget) || TARGET_BOTH.equals(crawlTarget)) {
                     crawlSharedDrives(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService,
-                            crawledFileIds);
+                            crawledFileIds, state);
                 }
                 if (TARGET_USERS.equals(crawlTarget) || TARGET_BOTH.equals(crawlTarget)) {
                     crawlUsers(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService,
-                            crawledFileIds);
+                            crawledFileIds, state);
                 }
             }
             if (logger.isDebugEnabled()) {
                 logger.debug("Shutting down thread executor.");
             }
             executorService.shutdown();
-            executorService.awaitTermination(getThreadPoolTimeoutSeconds(paramMap), TimeUnit.SECONDS);
+            final boolean drained = executorService.awaitTermination(getThreadPoolTimeoutSeconds(paramMap), TimeUnit.SECONDS);
+            if (state != null) {
+                if (alive && drained) {
+                    state.save();
+                } else {
+                    logger.warn("The crawl did not finish, so the start page tokens are left untouched "
+                            + "and the next run reads the same changes again.");
+                }
+            }
         } catch (final InterruptedException e) {
             throw new InterruptedRuntimeException(e);
         } finally {
             executorService.shutdownNow();
         }
+    }
+
+    /**
+     * Loads the persisted crawl state of a data configuration. Exists as an override point for tests.
+     *
+     * @param dataConfig The data configuration.
+     * @return The crawl state.
+     */
+    protected DriveCrawlState newCrawlState(final DataConfig dataConfig) {
+        return new DriveCrawlState(dataConfig);
+    }
+
+    /**
+     * Builds a single line fingerprint of the configuration that decides what a scope yields.
+     * <p>
+     * A stored start page token only describes the population it was taken over. Widening
+     * {@code query}, switching {@code corpora} from {@code user} to {@code allDrives} or crawling as
+     * a different {@code impersonate_user} all leave files that the previous run never indexed and
+     * that no change feed will ever report, because they did not change. Resuming such a token skips
+     * them permanently, so the signature has to invalidate it.
+     * </p>
+     * <p>
+     * Only <em>configuration</em> is hashed, never the drives or users discovered at runtime. A
+     * signature over discovered domain state would discard every scope's token whenever any single
+     * drive or user appears or disappears, degrading every subsequent run to a full crawl of the
+     * whole domain. Nothing is lost by leaving them out: a scope key with no stored token already
+     * routes to {@link #crawlFullyAndAnchor} in {@link #storeScope}, so a new shared drive or a new
+     * user is crawled in full and anchored on its own, and the token of a scope that disappeared is
+     * simply never read again.
+     * </p>
+     * <p>
+     * No parameter listed in {@link #SECRET_PARAM_KEYS} is an input. The result is written into the
+     * {@code handlerParameter} of the data configuration, which is stored in the config index and
+     * rendered in the admin UI, so a credential must not be derivable from it -- not even through a
+     * hash. The inputs are therefore an explicit allowlist rather than the parameter map minus the
+     * secrets: a later parameter that carries a credential is then excluded by default instead of
+     * being hashed until someone remembers to register it.
+     * </p>
+     *
+     * @param paramMap The parameters for the data store.
+     * @return The signature, as SHA-256 hex.
+     */
+    protected String buildCrawlSignature(final DataStoreParams paramMap) {
+        // getCrawlTarget trims, so " both" and "both" select the very same traversal.
+        final String source = String.join("\n", //
+                CRAWL_TARGET + "=" + paramMap.getAsString(CRAWL_TARGET, TARGET_SHARED_DRIVES).trim(), //
+                IMPERSONATE_USER + "=" + paramMap.getAsString(IMPERSONATE_USER, StringUtil.EMPTY), //
+                USER_QUERY + "=" + paramMap.getAsString(USER_QUERY, StringUtil.EMPTY), //
+                "query=" + paramMap.getAsString("query", StringUtil.EMPTY), //
+                "corpora=" + paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES), //
+                "spaces=" + paramMap.getAsString("spaces", StringUtil.EMPTY));
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(source.getBytes(StandardCharsets.UTF_8)));
+        } catch (final NoSuchAlgorithmException e) {
+            throw new DataStoreException("SHA-256 is not available.", e);
+        }
+    }
+
+    /**
+     * Discards the stored start page tokens when the crawl configuration changed, then records the
+     * new signature.
+     * <p>
+     * Absent, unreadable and mismatched are all treated the same way, because only a signature that
+     * is present and equal proves the tokens describe the current configuration. Discarding is the
+     * safe direction: it costs one full crawl, while a wrong resume is a silent and permanent hole in
+     * the index. It also cannot delete anything, since {@link #store} has already forced
+     * {@code delete_old_docs} to false for every incremental run, so the fallback full crawl
+     * re-indexes without the stale document sweep ever running.
+     * </p>
+     * <p>
+     * Nothing is persisted here. The state is only written back by {@link DriveCrawlState#save()},
+     * which {@link #storeFiles} calls solely when the crawl finished, so a run that was stopped
+     * leaves the previous signature and the previous tokens in place and the next run simply repeats
+     * this decision.
+     * </p>
+     *
+     * @param state The persisted crawl state, or null when the crawl is not incremental.
+     * @param paramMap The parameters for the data store.
+     */
+    protected void applyCrawlSignature(final DriveCrawlState state, final DataStoreParams paramMap) {
+        if (state == null) {
+            return;
+        }
+        final String signature = buildCrawlSignature(paramMap);
+        if (!state.isCompatible(signature)) {
+            logger.info("The crawl configuration changed. Discarding the stored start page tokens and crawling every scope in full.");
+            state.clearTokens();
+        }
+        state.setSignature(signature);
     }
 
     /**
@@ -582,16 +787,21 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * @param client The GSuiteClient.
      * @param executorService The executor that runs the per-file work.
      * @param crawledFileIds The file IDs already submitted.
+     * @param state The persisted crawl state, or null when the crawl is not incremental.
      */
     protected void crawlLegacy(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds,
+            final DriveCrawlState state) {
         final String query = paramMap.getAsString("query");
         final String corpora = paramMap.getAsString("corpora", GSuiteClient.ALL_DRIVES);
         final String spaces = paramMap.getAsString("spaces");
         final String fields = buildFileFields(paramMap);
-        client.getFiles(query, corpora, spaces, fields, file -> submitFile(dataConfig, callback, configMap, paramMap, scriptMap,
-                defaultDataMap, client, executorService, crawledFileIds, file));
+        storeScope(client, state, DriveCrawlState.userScopeKey(TARGET_LEGACY), null,
+                newChangeConsumer(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService,
+                        crawledFileIds),
+                () -> client.getFiles(query, corpora, spaces, fields, file -> submitFile(dataConfig, callback, configMap, paramMap,
+                        scriptMap, defaultDataMap, client, executorService, crawledFileIds, file)));
     }
 
     /**
@@ -606,12 +816,16 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * @param client The GSuiteClient.
      * @param executorService The executor that runs the per-file work.
      * @param crawledFileIds The file IDs already submitted.
+     * @param state The persisted crawl state, or null when the crawl is not incremental.
      */
     protected void crawlSharedDrives(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds,
+            final DriveCrawlState state) {
         final String query = paramMap.getAsString("query");
         final String fields = buildFileFields(paramMap);
+        final Consumer<Change> changeConsumer = newChangeConsumer(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap,
+                client, executorService, crawledFileIds);
         client.getDrives(sharedDrive -> {
             if (!alive) {
                 // The admin UI asked this data store to stop; do not start another listing.
@@ -620,8 +834,9 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             if (logger.isDebugEnabled()) {
                 logger.debug("Crawling a shared drive: {} ({})", sharedDrive.getName(), sharedDrive.getId());
             }
-            client.getFilesInDrive(sharedDrive.getId(), query, fields, file -> submitFile(dataConfig, callback, configMap, paramMap,
-                    scriptMap, defaultDataMap, client, executorService, crawledFileIds, file));
+            storeScope(client, state, DriveCrawlState.driveScopeKey(sharedDrive.getId()), sharedDrive.getId(), changeConsumer,
+                    () -> client.getFilesInDrive(sharedDrive.getId(), query, fields, file -> submitFile(dataConfig, callback, configMap,
+                            paramMap, scriptMap, defaultDataMap, client, executorService, crawledFileIds, file)));
         });
     }
 
@@ -637,10 +852,12 @@ public class GoogleDriveDataStore extends AbstractDataStore {
      * @param client The GSuiteClient.
      * @param executorService The executor that runs the per-file work.
      * @param crawledFileIds The file IDs already submitted.
+     * @param state The persisted crawl state, or null when the crawl is not incremental.
      */
     protected void crawlUsers(final DataConfig dataConfig, final IndexUpdateCallback callback, final Map<String, Object> configMap,
             final DataStoreParams paramMap, final Map<String, String> scriptMap, final Map<String, Object> defaultDataMap,
-            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds) {
+            final GSuiteClient client, final ExecutorService executorService, final Set<String> crawledFileIds,
+            final DriveCrawlState state) {
         final String query = paramMap.getAsString("query");
         final String spaces = paramMap.getAsString("spaces");
         final String fields = buildFileFields(paramMap);
@@ -655,9 +872,251 @@ public class GoogleDriveDataStore extends AbstractDataStore {
             // Not closed on purpose: the per-user client borrows the transport of the primary
             // client, which storeData closes, and owns nothing else that has to be released.
             final GSuiteClient userClient = client.forUser(userEmail);
-            userClient.getFiles(query, GSuiteClient.USER_CORPORA, spaces, fields, file -> submitFile(dataConfig, callback, configMap,
-                    paramMap, scriptMap, defaultDataMap, userClient, executorService, crawledFileIds, file));
+            // forUser rebuilds the client from the parameters, so the projection is set again here.
+            userClient.setFileFields(getFileFieldProjection(paramMap));
+            storeScope(userClient, state, DriveCrawlState.userScopeKey(userEmail), null,
+                    newChangeConsumer(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, userClient, executorService,
+                            crawledFileIds),
+                    () -> userClient.getFiles(query, GSuiteClient.USER_CORPORA, spaces, fields, file -> submitFile(dataConfig, callback,
+                            configMap, paramMap, scriptMap, defaultDataMap, userClient, executorService, crawledFileIds, file)));
         }
+    }
+
+    /**
+     * Crawls one scope, either fully or through its change feed.
+     * <p>
+     * A scope is one shared drive ({@code driveId} set) or the view of one impersonated user
+     * ({@code driveId} null). Each has its own change feed and therefore its own start page token.
+     * </p>
+     *
+     * @param client The GSuiteClient bound to this scope.
+     * @param state The persisted crawl state, or null when the crawl is not incremental.
+     * @param scopeKey The scope key of this scope.
+     * @param driveId The shared drive id, or null for a user scope.
+     * @param changeConsumer The consumer applied to each change.
+     * @param fullCrawl The full listing of this scope.
+     */
+    protected void storeScope(final GSuiteClient client, final DriveCrawlState state, final String scopeKey, final String driveId,
+            final Consumer<Change> changeConsumer, final Runnable fullCrawl) {
+        if (state == null) {
+            fullCrawl.run();
+            return;
+        }
+        final String pageToken = state.getToken(scopeKey);
+        if (StringUtil.isBlank(pageToken)) {
+            logger.info("No start page token for {}. Crawling it fully and taking a token for the next run.", scopeKey);
+            crawlFullyAndAnchor(client, state, scopeKey, driveId, fullCrawl);
+            return;
+        }
+        try {
+            final String newStartPageToken = client.getChanges(pageToken, driveId, changeConsumer);
+            if (StringUtil.isNotBlank(newStartPageToken)) {
+                state.putToken(scopeKey, newStartPageToken);
+            }
+        } catch (final Exception e) {
+            // The feed lost a page, so the deltas it would have carried are gone. Only a full
+            // listing can bring the scope back in sync.
+            logger.warn("Failed to read the changes of {}. Crawling it fully and taking a new token.", scopeKey, e);
+            state.removeToken(scopeKey);
+            crawlFullyAndAnchor(client, state, scopeKey, driveId, fullCrawl);
+        }
+    }
+
+    /**
+     * Lists a scope in full and anchors its change feed for the next run.
+     * <p>
+     * The token is taken <em>before</em> the listing: a file changed while the listing runs is then
+     * replayed by the next run, at worst indexed twice, instead of being missed. A scope whose token
+     * could not be taken is left unanchored, so the next run lists it in full again rather than
+     * resuming from a point it never reached.
+     * </p>
+     *
+     * @param client The GSuiteClient bound to this scope.
+     * @param state The persisted crawl state.
+     * @param scopeKey The scope key of this scope.
+     * @param driveId The shared drive id, or null for a user scope.
+     * @param fullCrawl The full listing of this scope.
+     */
+    protected void crawlFullyAndAnchor(final GSuiteClient client, final DriveCrawlState state, final String scopeKey, final String driveId,
+            final Runnable fullCrawl) {
+        String token = null;
+        try {
+            token = client.getStartPageToken(driveId);
+        } catch (final Exception e) {
+            logger.warn("Failed to take a start page token for {}. The next run crawls it fully again.", scopeKey, e);
+        }
+        fullCrawl.run();
+        if (token != null) {
+            state.putToken(scopeKey, token);
+        } else {
+            state.removeToken(scopeKey);
+        }
+    }
+
+    /**
+     * Builds the consumer applied to every change of one scope.
+     * <p>
+     * A change either drops a document from the index or submits the file for indexing through the
+     * same path as a full listing, so the file ID de-duplication also covers a file that changed in
+     * several scopes.
+     * </p>
+     * <p>
+     * A change feed is per scope and {@code removed} covers a loss of access as well as a deletion,
+     * so with {@link #TARGET_USERS} or {@link #TARGET_BOTH} a file that one user may no longer read
+     * is dropped from the index even when another user still can. It comes back on the next change
+     * to that file, or on the next full crawl.
+     * </p>
+     *
+     * @param dataConfig The data configuration.
+     * @param callback The callback to index the files.
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param scriptMap The script map.
+     * @param defaultDataMap The default data map.
+     * @param client The GSuiteClient bound to this scope.
+     * @param executorService The executor that runs the per-file work.
+     * @param crawledFileIds The file IDs already submitted.
+     * @return The change consumer.
+     */
+    protected Consumer<Change> newChangeConsumer(final DataConfig dataConfig, final IndexUpdateCallback callback,
+            final Map<String, Object> configMap, final DataStoreParams paramMap, final Map<String, String> scriptMap,
+            final Map<String, Object> defaultDataMap, final GSuiteClient client, final ExecutorService executorService,
+            final Set<String> crawledFileIds) {
+        return change -> {
+            if (!alive) {
+                // The admin UI asked this data store to stop; do not apply any more changes.
+                return;
+            }
+            final File file = change.getFile();
+            if (isDeletion(change)) {
+                if (file != null) {
+                    deleteFile(configMap, paramMap, file);
+                } else {
+                    deleteFileById(dataConfig, change.getFileId());
+                }
+                return;
+            }
+            if (file == null) {
+                // A drive level change carries no file, so there is nothing to index.
+                if (logger.isDebugEnabled()) {
+                    logger.debug("Skipping a change with no file: {}", change.getChangeType());
+                }
+                return;
+            }
+            submitFile(dataConfig, callback, configMap, paramMap, scriptMap, defaultDataMap, client, executorService, crawledFileIds, file);
+        };
+    }
+
+    /**
+     * Returns whether a change means the document must leave the index.
+     *
+     * @param change The change.
+     * @return true when the file was removed or moved to the trash.
+     */
+    protected boolean isDeletion(final Change change) {
+        if (Boolean.TRUE.equals(change.getRemoved())) {
+            return true;
+        }
+        final File file = change.getFile();
+        return file != null && Boolean.TRUE.equals(file.getTrashed());
+    }
+
+    /**
+     * Drops the document of a file the change still describes.
+     * <p>
+     * The URL is the one {@link #getUrl} produced when the file was indexed, so the deletion is an
+     * exact term match and costs no wildcard. A configuration whose {@link #FIELDS} projection drops
+     * {@code webViewLink} indexes the fallback URL instead, and both forms go through
+     * {@link #getUrl}, so the two stay in step.
+     * </p>
+     *
+     * @param configMap The configuration map.
+     * @param paramMap The parameters for the data store.
+     * @param file The removed file.
+     */
+    protected void deleteFile(final Map<String, Object> configMap, final DataStoreParams paramMap, final File file) {
+        final String url = getUrl(configMap, paramMap, file);
+        if (StringUtil.isBlank(url)) {
+            return;
+        }
+        try {
+            final long deleted = deleteDocumentByUrl(url);
+            if (logger.isDebugEnabled()) {
+                logger.debug("Deleted {} documents. (url: {})", deleted, url);
+            }
+        } catch (final Exception e) {
+            logger.warn("Failed to delete the document. (url: {})", url, e);
+        }
+    }
+
+    /**
+     * Drops the document of a file that is only known by its id.
+     * <p>
+     * A removed change carries no {@code File}, so the URL that was indexed cannot be reproduced: it
+     * is the {@code webViewLink}, whose shape depends on the mime type
+     * ({@code docs.google.com/document/d/<id>/edit} for a document,
+     * {@code .../spreadsheets/d/<id>/edit} for a spreadsheet, and so on). The document is therefore
+     * matched on the file id appearing anywhere in its URL.
+     * </p>
+     * <p>
+     * The {@code config_id} filter is not optional: without it a Drive file id that also occurs in
+     * the URL of another data store's document would delete that document too. A leading wildcard is
+     * expensive, but the number of these queries is bounded by the number of changes, not by the size
+     * of the index.
+     * </p>
+     * <p>
+     * The residual limit is that the indexed URL must contain the file id. That holds for
+     * {@code webViewLink} and for the fallback URL, but not if a crawling script rewrites {@code url}
+     * to a value the id does not appear in; such a document can only be removed by a full crawl with
+     * {@code delete_old_docs} enabled.
+     * </p>
+     *
+     * @param dataConfig The data configuration, whose config id scopes the deletion.
+     * @param fileId The Drive file id.
+     */
+    protected void deleteFileById(final DataConfig dataConfig, final String fileId) {
+        if (StringUtil.isBlank(fileId)) {
+            return;
+        }
+        final String configId = dataConfig == null ? null : dataConfig.getConfigId();
+        if (StringUtil.isBlank(configId)) {
+            logger.warn("Cannot delete the document of {}: the data configuration has no config id, "
+                    + "and an unscoped match would reach the documents of other data stores.", fileId);
+            return;
+        }
+        final FessConfig fessConfig = ComponentUtil.getFessConfig();
+        final QueryBuilder queryBuilder = QueryBuilders.boolQuery()
+                .filter(QueryBuilders.termQuery(fessConfig.getIndexFieldConfigId(), configId))
+                .filter(QueryBuilders.wildcardQuery(fessConfig.getIndexFieldUrl(), "*" + fileId + "*"));
+        try {
+            final long deleted = deleteDocumentByQuery(queryBuilder);
+            if (logger.isDebugEnabled()) {
+                logger.debug("Deleted {} documents. (fileId: {})", deleted, fileId);
+            }
+        } catch (final Exception e) {
+            logger.warn("Failed to delete the documents. (fileId: {})", fileId, e);
+        }
+    }
+
+    /**
+     * Deletes every indexed document with the given URL. Separated so tests can capture the deletion.
+     *
+     * @param url The URL of the documents to delete.
+     * @return The number of deleted documents.
+     */
+    protected long deleteDocumentByUrl(final String url) {
+        return ComponentUtil.getIndexingHelper().deleteDocumentByUrl(ComponentUtil.getSearchEngineClient(), url);
+    }
+
+    /**
+     * Deletes every indexed document matching the given query. Separated so tests can capture the
+     * deletion.
+     *
+     * @param queryBuilder The query.
+     * @return The number of deleted documents.
+     */
+    protected long deleteDocumentByQuery(final QueryBuilder queryBuilder) {
+        return ComponentUtil.getIndexingHelper().deleteDocumentByQuery(ComponentUtil.getSearchEngineClient(), queryBuilder);
     }
 
     /**
@@ -1077,12 +1536,23 @@ public class GoogleDriveDataStore extends AbstractDataStore {
         }
         final String id = file.getId();
         if (StringUtil.isNotBlank(id)) {
-            return "https://drive.google.com/open?id=" + id;
+            return getFallbackUrl(id);
         }
         if (logger.isDebugEnabled()) {
             logger.debug("id is null.");
         }
         return null;
+    }
+
+    /**
+     * Returns the URL used when a file has no {@code webViewLink}. Indexing and deletion must agree
+     * on this form, so both reach it through {@link #getUrl}.
+     *
+     * @param id The Drive file id.
+     * @return The fallback URL.
+     */
+    protected String getFallbackUrl(final String id) {
+        return "https://drive.google.com/open?id=" + id;
     }
 
     /**
