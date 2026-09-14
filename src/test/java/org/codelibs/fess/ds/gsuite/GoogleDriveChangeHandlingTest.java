@@ -30,10 +30,10 @@ import org.codelibs.fess.exception.DataStoreException;
 import org.codelibs.fess.opensearch.config.exentity.DataConfig;
 import org.codelibs.fess.util.ComponentUtil;
 import org.junit.jupiter.api.Test;
-import org.opensearch.index.query.BoolQueryBuilder;
-import org.opensearch.index.query.QueryBuilder;
-import org.opensearch.index.query.TermQueryBuilder;
-import org.opensearch.index.query.WildcardQueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.BoolQueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.QueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.TermQueryBuilder;
+import org.codelibs.fesen.opensearch.index.query.WildcardQueryBuilder;
 
 import com.google.api.services.drive.model.Change;
 import com.google.api.services.drive.model.File;
